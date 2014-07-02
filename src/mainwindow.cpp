@@ -54,17 +54,23 @@
 #include "persistentinfo.h"
 #include "menuactiontooltipbehavior.h"
 #include "tabbedcrawlerwidget.h"
+#include "externalcom.h"
 
 // Returns the size in human readable format
 static QString readableSize( qint64 size );
 
-MainWindow::MainWindow( std::unique_ptr<Session> session ) :
+MainWindow::MainWindow( std::unique_ptr<Session> session,
+        std::shared_ptr<ExternalCommunicator> external_communicator ) :
     session_( std::move( session )  ),
+    externalCommunicator_( external_communicator ),
     recentFiles_( Persistent<RecentFiles>( "recentFiles" ) ),
     mainIcon_(),
     signalMux_(),
     quickFindMux_( session_->getQuickFindPattern() ),
     mainTabWidget_()
+#ifdef GLOGG_SUPPORTS_VERSION_CHECKING
+    ,versionChecker_()
+#endif
 {
     createActions();
     createMenus();
@@ -109,8 +115,8 @@ MainWindow::MainWindow( std::unique_ptr<Session> session ) :
     // Register for progress status bar
     signalMux_.connect( SIGNAL( loadingProgressed( int ) ),
             this, SLOT( updateLoadingProgress( int ) ) );
-    signalMux_.connect( SIGNAL( loadingFinished( bool ) ),
-            this, SLOT( displayNormalStatus( bool ) ) );
+    signalMux_.connect( SIGNAL( loadingFinished( LoadingStatus ) ),
+            this, SLOT( handleLoadingFinished( LoadingStatus ) ) );
 
     // Configure the main tabbed widget
     mainTabWidget_.setDocumentMode( true );
@@ -145,6 +151,16 @@ MainWindow::MainWindow( std::unique_ptr<Session> session ) :
              &quickFindWidget_, SLOT( notify( const QFNotification& ) ) );
     connect( &quickFindMux_, SIGNAL( clearNotification() ),
              &quickFindWidget_, SLOT( clearNotification() ) );
+
+    // Actions from external instances
+    connect( externalCommunicator_.get(), SIGNAL( loadFile( const QString& ) ),
+             this, SLOT( loadFileNonInteractive( const QString& ) ) );
+
+#ifdef GLOGG_SUPPORTS_VERSION_CHECKING
+    // Version checker notification
+    connect( &versionChecker_, SIGNAL( newVersionFound( const QString& ) ),
+            this, SLOT( newVersionNotification( const QString& ) ) );
+#endif
 
     // Construct the QuickFind bar
     quickFindWidget_.hide();
@@ -187,6 +203,15 @@ void MainWindow::loadInitialFile( QString fileName )
     // Is there a file passed as argument?
     if ( !fileName.isEmpty() )
         loadFile( fileName );
+}
+
+void MainWindow::startBackgroundTasks()
+{
+    LOG(logDEBUG) << "startBackgroundTasks";
+
+#ifdef GLOGG_SUPPORTS_VERSION_CHECKING
+    versionChecker_.startCheck();
+#endif
 }
 
 //
@@ -438,6 +463,7 @@ void MainWindow::about()
 #ifdef GLOGG_COMMIT
                 "<p>Built " GLOGG_DATE " from " GLOGG_COMMIT
 #endif
+                "<p><a href=\"http://glogg.bonnefon.org/\">http://glogg.bonnefon.org/</a></p>"
                 "<p>Copyright &copy; 2009, 2010, 2011, 2012, 2013, 2014 Nicolas Bonnefon and other contributors"
                 "<p>You may modify and redistribute the program under the terms of the GPL (version 3 or later)." ) );
 }
@@ -501,16 +527,17 @@ void MainWindow::updateLoadingProgress( int progress )
     }
 }
 
-void MainWindow::displayNormalStatus( bool success )
+void MainWindow::handleLoadingFinished( LoadingStatus status )
 {
     QLocale defaultLocale;
 
-    LOG(logDEBUG) << "displayNormalStatus success=" << success;
+    LOG(logDEBUG) << "handleLoadingFinished success=" <<
+        ( status == LoadingStatus::Successful );
 
     // No file is loading
     loadingFileName.clear();
 
-    if ( success )
+    if ( status == LoadingStatus::Successful )
     {
         // Following should always work as we will only receive enter
         // this slot if there is a crawler connected.
@@ -545,6 +572,16 @@ void MainWindow::displayNormalStatus( bool success )
     }
     else
     {
+        if ( status == LoadingStatus::NoMemory )
+        {
+            QMessageBox alertBox;
+            alertBox.setText( "Not enough memory." );
+            alertBox.setInformativeText( "The system does not have enough \
+memory to hold the index for this file. The file will now be closed." );
+            alertBox.setIcon( QMessageBox::Critical );
+            alertBox.exec();
+        }
+
         closeTab( mainTabWidget_.currentIndex()  );
     }
 
@@ -598,6 +635,26 @@ void MainWindow::currentTabChanged( int index )
 void MainWindow::changeQFPattern( const QString& newPattern )
 {
     quickFindWidget_.changeDisplayedPattern( newPattern );
+}
+
+void MainWindow::loadFileNonInteractive( const QString& file_name )
+{
+    LOG(logDEBUG) << "loadFileNonInteractive( "
+        << file_name.toStdString() << " )";
+
+    loadFile( file_name );
+}
+
+void MainWindow::newVersionNotification( const QString& new_version )
+{
+    LOG(logDEBUG) << "newVersionNotification( " <<
+        new_version.toStdString() << " )";
+
+    QMessageBox msgBox;
+    msgBox.setText( QString( "A new version of glogg (%1) is available for download <p>"
+                "<a href=\"http://glogg.bonnefon.org/download.html\">http://glogg.bonnefon.org/download.html</a>" 
+                ).arg( new_version ) );
+    msgBox.exec();
 }
 
 //
@@ -661,6 +718,16 @@ void MainWindow::keyPressEvent( QKeyEvent* keyEvent )
 bool MainWindow::loadFile( const QString& fileName )
 {
     LOG(logDEBUG) << "loadFile ( " << fileName.toStdString() << " )";
+
+    // First check if the file is already open...
+    CrawlerWidget* existing_crawler = dynamic_cast<CrawlerWidget*>(
+            session_->getViewIfOpen( fileName.toStdString() ) );
+    if ( existing_crawler ) {
+        // ... and switch to it.
+        mainTabWidget_.setCurrentWidget( existing_crawler );
+
+        return true;
+    }
 
     // Load the file
     loadingFileName = fileName;
@@ -759,11 +826,17 @@ void MainWindow::writeSettings()
 {
     // Save the session
     // Generate the ordered list of widgets and their topLine
-    std::vector<std::pair<const ViewInterface*, uint64_t>> widget_list;
+    std::vector<
+            std::tuple<const ViewInterface*, uint64_t, std::shared_ptr<const ViewContextInterface>>
+        > widget_list;
     for ( int i = 0; i < mainTabWidget_.count(); ++i )
-        widget_list.push_back( {
-                dynamic_cast<const ViewInterface*>( mainTabWidget_.widget( i ) ),
-                0 } );
+    {
+        auto view = dynamic_cast<const ViewInterface*>( mainTabWidget_.widget( i ) );
+        widget_list.push_back( std::make_tuple(
+                view,
+                0UL,
+                view->context() ) );
+    }
     session_->save( widget_list );
     //SessionInfo& session = Persistent<SessionInfo>( "session" );
     //session.setGeometry( saveGeometry() );

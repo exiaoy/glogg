@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2009, 2010, 2011, 2013 Nicolas Bonnefon and other contributors
+ * Copyright (C) 2009, 2010, 2011, 2013, 2014 Nicolas Bonnefon and other contributors
  *
  * This file is part of glogg.
  *
@@ -25,7 +25,12 @@
 namespace po = boost::program_options;
 
 #include <iostream>
+#include <iomanip>
 using namespace std;
+
+#ifdef _WIN32
+#include "unistd.h"
+#endif
 
 #include "persistentinfo.h"
 #include "sessioninfo.h"
@@ -35,6 +40,16 @@ using namespace std;
 #include "session.h"
 #include "mainwindow.h"
 #include "savedsearches.h"
+#include "loadingstatus.h"
+
+#include "externalcom.h"
+#ifdef GLOGG_SUPPORTS_DBUS
+#include "dbusexternalcom.h"
+#elif GLOGG_SUPPORTS_WINIPC
+#include "winexternalcom.h"
+#endif
+
+
 #include "log.h"
 
 static void print_version();
@@ -45,6 +60,13 @@ int main(int argc, char *argv[])
 
     string filename = "";
 
+    // Configuration
+    bool new_session = false;
+    bool multi_instance = false;
+#ifdef _WIN32
+    bool log_to_file = false;
+#endif
+
     TLogLevel logLevel = logWARNING;
 
     try {
@@ -52,6 +74,11 @@ int main(int argc, char *argv[])
         desc.add_options()
             ("help,h", "print out program usage (this message)")
             ("version,v", "print glogg's version information")
+            ("multi,m", "allow multiple instance of glogg to run simultaneously (use together with -s)")
+            ("new-session,s", "do not load the previous session")
+#ifdef _WIN32
+            ("log,l", "save the log to a file (Windows only)")
+#endif
             ("debug,d", "output more debug (include multiple times for more verbosity e.g. -dddd")
             ;
         po::options_description desc_hidden("Hidden options");
@@ -92,9 +119,19 @@ int main(int argc, char *argv[])
             return 0;
         }
 
-        if ( vm.count( "debug" ) ) {
+        if ( vm.count( "debug" ) )
             logLevel = logINFO;
-        }
+
+        if ( vm.count( "multi" ) )
+            multi_instance = true;
+
+        if ( vm.count( "new-session" ) )
+            new_session = true;
+
+#ifdef _WIN32
+        if ( vm.count( "log" ) )
+            log_to_file = true;
+#endif
 
         for ( string s = "dd"; s.length() <= 10; s.append("d") )
             if ( vm.count( s ) )
@@ -111,12 +148,57 @@ int main(int argc, char *argv[])
         cerr << "Exception of unknown type!\n";
     }
 
-#if 0
-    FILE* file = fopen("glogg.log", "w");
-    Output2FILE::Stream() = file;
+#ifdef _WIN32
+    if ( log_to_file )
+    {
+        char file_name[255];
+        snprintf( file_name, sizeof file_name, "glogg_%d.log", getpid() );
+        FILE* file = fopen(file_name, "w");
+        Output2FILE::Stream() = file;
+    }
 #endif
 
     FILELog::setReportingLevel( logLevel );
+
+    // External communicator
+    shared_ptr<ExternalCommunicator> externalCommunicator = nullptr;
+    shared_ptr<ExternalInstance> externalInstance = nullptr;
+
+    try {
+#ifdef GLOGG_SUPPORTS_DBUS
+        externalCommunicator = make_shared<DBusExternalCommunicator>();
+        externalInstance = shared_ptr<ExternalInstance>(
+                externalCommunicator->otherInstance() );
+#elif GLOGG_SUPPORTS_WINIPC
+        externalCommunicator = make_shared<WinExternalCommunicator>();
+        externalInstance = shared_ptr<ExternalInstance>(
+                externalCommunicator->otherInstance() );
+#endif
+    }
+    catch(CantCreateExternalErr& e) {
+        LOG(logWARNING) << "Cannot initialise external communication.";
+    }
+
+    LOG(logDEBUG) << "externalInstance = " << externalInstance;
+    if ( ( ! multi_instance ) && externalInstance ) {
+        uint32_t version = externalInstance->getVersion();
+        LOG(logINFO) << "Found another glogg (version = "
+            << std::setbase(16) << version << ")";
+
+        externalInstance->loadFile( QString::fromStdString( filename ) );
+
+        return 0;
+    }
+    else {
+        // FIXME: there is a race condition here. One glogg could start
+        // between the declaration of externalInstance and here,
+        // is it a problem?
+        if ( externalCommunicator )
+            externalCommunicator->startListening();
+    }
+
+    // Register types for Qt
+    qRegisterMetaType<LoadingStatus>("LoadingStatus");
 
     // Register the configuration items
     GetPersistentInfo().migrateAndInit();
@@ -130,17 +212,23 @@ int main(int argc, char *argv[])
             std::make_shared<SavedSearches>(), QString( "savedSearches" ) );
     GetPersistentInfo().registerPersistable(
             std::make_shared<RecentFiles>(), QString( "recentFiles" ) );
+#ifdef GLOGG_SUPPORTS_VERSION_CHECKING
+    GetPersistentInfo().registerPersistable(
+            std::make_shared<VersionCheckerConfig>(), QString( "versionChecker" ) );
+#endif
 
     // FIXME: should be replaced by a two staged init of MainWindow
     GetPersistentInfo().retrieve( QString( "settings" ) );
 
     std::unique_ptr<Session> session( new Session() );
-    MainWindow mw( std::move( session ) );
+    MainWindow mw( std::move( session ), externalCommunicator );
 
     LOG(logDEBUG) << "MainWindow created.";
     mw.show();
-    mw.reloadSession();
+    if ( ! new_session )
+        mw.reloadSession();
     mw.loadInitialFile( QString::fromStdString( filename ) );
+    mw.startBackgroundTasks();
     return app.exec();
 }
 
@@ -150,7 +238,7 @@ static void print_version()
 #ifdef GLOGG_COMMIT
     cout << "Built " GLOGG_DATE " from " GLOGG_COMMIT "\n";
 #endif
-    cout << "Copyright (C) 2009, 2010, 2011, 2012, 2013 Nicolas Bonnefon and other contributors\n";
+    cout << "Copyright (C) 2009, 2010, 2011, 2012, 2013, 2014 Nicolas Bonnefon and other contributors\n";
     cout << "This is free software.  You may redistribute copies of it under the terms of\n";
     cout << "the GNU General Public License <http://www.gnu.org/licenses/gpl.html>.\n";
     cout << "There is NO WARRANTY, to the extent permitted by law.\n";

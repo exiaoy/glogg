@@ -30,11 +30,15 @@
 #include "tabbedcrawlerwidget.h"
 #include "quickfindwidget.h"
 #include "quickfindmux.h"
+#ifdef GLOGG_SUPPORTS_VERSION_CHECKING
+#include "versionchecker.h"
+#endif
 
 class QAction;
 class Session;
 class RecentFiles;
 class MenuActionToolTipBehavior;
+class ExternalCommunicator;
 
 // Main window of the application, creates menus, toolbar and
 // the CrawlerWidget
@@ -45,12 +49,16 @@ class MainWindow : public QMainWindow
   public:
     // Constructor
     // The ownership of the session is transferred to us
-    MainWindow( std::unique_ptr<Session> session );
+    MainWindow( std::unique_ptr<Session> session,
+            std::shared_ptr<ExternalCommunicator> external_communicator );
 
     // Re-load the files from the previous session
     void reloadSession();
     // Loads the initial file (parameter passed or from config file)
     void loadInitialFile( QString fileName );
+    // Starts the lower priority activities the MW controls such as
+    // version checking etc...
+    void startBackgroundTasks();
 
   protected:
     void closeEvent( QCloseEvent* event );
@@ -86,7 +94,8 @@ class MainWindow : public QMainWindow
     void updateLoadingProgress( int progress );
     // Instructs the widget to display the 'normal' status bar,
     // without the progress gauge and with file info
-    void displayNormalStatus( bool success );
+    // or an error recovery when loading is finished
+    void handleLoadingFinished( LoadingStatus status );
 
     // Close the tab with the passed index
     void closeTab( int index );
@@ -96,6 +105,13 @@ class MainWindow : public QMainWindow
     // Instructs the widget to change the pattern in the QuickFind widget
     // and confirm it.
     void changeQFPattern( const QString& newPattern );
+
+    // Load a file in a new tab (non-interactive)
+    // (for use from e.g. IPC)
+    void loadFileNonInteractive( const QString& file_name );
+
+    // Notify the user a new version is available
+    void newVersionNotification( const QString& new_version );
 
   signals:
     // Is emitted when new settings must be used
@@ -125,6 +141,7 @@ class MainWindow : public QMainWindow
     void displayQuickFindBar( QuickFindMux::QFDirection direction );
 
     std::unique_ptr<Session> session_;
+    std::shared_ptr<ExternalCommunicator> externalCommunicator_;
     std::shared_ptr<RecentFiles> recentFiles_;
     QString loadingFileName;
 
@@ -172,6 +189,11 @@ class MainWindow : public QMainWindow
 
     // The main widget
     TabbedCrawlerWidget mainTabWidget_;
+
+    // Version checker
+#ifdef GLOGG_SUPPORTS_VERSION_CHECKING
+    VersionChecker versionChecker_;
+#endif
 };
 
 #endif

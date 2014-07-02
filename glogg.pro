@@ -1,12 +1,17 @@
 # -------------------------------------------------
 # glogg
 # -------------------------------------------------
+
+# Debug builds: qmake CONFIG+=debug
+# Release builds: qmake
+
 TARGET = glogg
 TEMPLATE = app
 
 greaterThan(QT_MAJOR_VERSION, 4): QT += widgets
 
 win32:Debug:CONFIG += console
+
 # Necessary when cross-compiling:
 win32:Release:QMAKE_LFLAGS += "-Wl,-subsystem,windows"
 
@@ -49,7 +54,7 @@ SOURCES += \
     src/marks.cpp \
     src/quickfindmux.cpp \
     src/signalmux.cpp \
-    src/tabbedcrawlerwidget.cpp
+    src/tabbedcrawlerwidget.cpp \
 
 INCLUDEPATH += src/
 
@@ -89,7 +94,9 @@ HEADERS += \
     src/qfnotifications.h \
     src/quickfindmux.h \
     src/signalmux.h \
-    src/tabbedcrawlerwidget.h
+    src/tabbedcrawlerwidget.h \
+    src/loadingstatus.h \
+    src/externalcom.h \
 
 isEmpty(BOOST_PATH) {
     message(Building using system dynamic Boost libraries)
@@ -156,18 +163,21 @@ target.path = $$PREFIX/bin
 INSTALLS = target icon16 icon32 icon_svg doc desktop
 
 # Build directories
-debug:OBJECTS_DIR = $${OUT_PWD}/.obj/debug-shared
-release:OBJECTS_DIR = $${OUT_PWD}/.obj/release-shared
-debug:MOC_DIR = $${OUT_PWD}/.moc/debug-shared
-release:MOC_DIR = $${OUT_PWD}/.moc/release-shared
-debug:UI_DIR = $${OUT_PWD}/.ui/debug-shared
-release:UI_DIR = $${OUT_PWD}/.ui/release-shared
+CONFIG(debug, debug|release) {
+    DESTDIR = debug
+} else {
+    DESTDIR = release
+}
 
-# Debug symbols in debug builds
-# debug:QMAKE_CXXFLAGS += -g -O0
+OBJECTS_DIR = $${OUT_PWD}/.obj/$${DESTDIR}-shared
+MOC_DIR = $${OUT_PWD}/.moc/$${DESTDIR}-shared
+UI_DIR = $${OUT_PWD}/.ui/$${DESTDIR}-shared
+
+# Debug symbols even in release build
+QMAKE_CXXFLAGS = -g
 
 # Which compiler are we using
-system( $${QMAKE_CXX} --version | grep -e " 4\.[7-9]" ) {
+system( $${QMAKE_CXX} --version | grep -e " 4\\.[7-9]" ) {
     message ( "g++ version 4.7 or newer, supports C++11" )
     CONFIG += C++11
 }
@@ -187,8 +197,11 @@ GPROF {
 }
 
 isEmpty(LOG_LEVEL) {
-    Release:DEFINES += FILELOG_MAX_LEVEL=\"logERROR\"
-    Debug:DEFINES += FILELOG_MAX_LEVEL=\"logDEBUG4\"
+    CONFIG(debug, debug|release) {
+        DEFINES += FILELOG_MAX_LEVEL=\"logDEBUG4\"
+    } else {
+        DEFINES += FILELOG_MAX_LEVEL=\"logDEBUG\"
+    }
 }
 else {
     message("Using specified log level: $$LOG_LEVEL")
@@ -210,3 +223,32 @@ else {
     QMAKE_CXXFLAGS += -DGLOGG_VERSION=\\\"$$VERSION\\\"
 }
 
+# Optional features (e.g. CONFIG+=no-dbus)
+system(pkg-config --exists QtDBus):!no-dbus {
+    message("Support for D-BUS will be included")
+    QT += dbus
+    QMAKE_CXXFLAGS += -DGLOGG_SUPPORTS_DBUS
+    SOURCES += src/dbusexternalcom.cpp
+    HEADERS += src/dbusexternalcom.h
+}
+else {
+    message("Support for D-BUS will NOT be included")
+    win32 {
+        message("Support for Windows IPC will be included")
+        QMAKE_CXXFLAGS += -DGLOGG_SUPPORTS_WINIPC
+        SOURCES += src/winexternalcom.cpp
+        HEADERS += src/winexternalcom.h
+    }
+}
+
+# Version checking
+version_checker {
+    message("Version checker will be included")
+    QT += network
+    QMAKE_CXXFLAGS += -DGLOGG_SUPPORTS_VERSION_CHECKING
+    SOURCES += src/versionchecker.cpp
+    HEADERS += src/versionchecker.h
+}
+else {
+    message("Version checker will NOT be included")
+}

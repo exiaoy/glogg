@@ -17,33 +17,18 @@
  * along with glogg.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#ifndef TABBEDCRAWLERWIDGET_H
-#define TABBEDCRAWLERWIDGET_H
+#ifndef LOADINGSTATUS_H
+#define LOADINGSTATUS_H
 
-#include <QTabWidget>
-#include <QTabBar>
+#include <QMetaType>
 
-// This class represents glogg's main widget, a tabbed
-// group of CrawlerWidgets.
-// This is a very slightly customised QTabWidget, with
-// a particular style.
-class TabbedCrawlerWidget : public QTabWidget
-{
-  Q_OBJECT
-    public:
-      TabbedCrawlerWidget();
-      virtual ~TabbedCrawlerWidget() {}
-
-      // "Overridden" addTab/removeTab that automatically
-      // show/hide the tab bar
-      int addTab( QWidget* page, const QString& label );
-      void removeTab( int index );
-
-    protected:
-      void keyPressEvent( QKeyEvent* event );
-
-    private:
-      QTabBar myTabBar_;
+// Loading status of a file
+enum class LoadingStatus {
+    Successful,
+    Interrupted,
+    NoMemory
 };
+
+Q_DECLARE_METATYPE( LoadingStatus )
 
 #endif
