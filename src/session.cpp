@@ -23,6 +23,7 @@
 
 #include <cassert>
 #include <QFileInfo>
+#include <algorithm>
 
 #include "viewinterface.h"
 #include "persistentinfo.h"
@@ -49,7 +50,7 @@ Session::~Session()
 
 ViewInterface* Session::getViewIfOpen( const std::string& file_name ) const
 {
-    auto result = find_if( openFiles_.begin(), openFiles_.end(),
+    auto result = std::find_if( openFiles_.begin(), openFiles_.end(),
             [&](const std::pair<const ViewInterface*, OpenFile>& o)
             { return ( o.second.fileName == file_name ); } );
 
@@ -84,7 +85,8 @@ void Session::save( std::vector<
         std::tuple<const ViewInterface*,
             uint64_t,
             std::shared_ptr<const ViewContextInterface>>
-        > view_list )
+        > view_list,
+        const QByteArray& geometry )
 {
     LOG(logDEBUG) << "Session::save";
 
@@ -106,6 +108,7 @@ void Session::save( std::vector<
     std::shared_ptr<SessionInfo> session =
         Persistent<SessionInfo>( "session" );
     session->setOpenFiles( session_files );
+    session->setGeometry( geometry );
     GetPersistentInfo().save( QString( "session" ) );
 }
 
@@ -118,6 +121,7 @@ std::vector<std::pair<std::string, ViewInterface*>> Session::restore(
         Persistent<SessionInfo>( "session" );
 
     std::vector<SessionInfo::OpenFile> session_files = session->openFiles();
+    LOG(logDEBUG) << "Session returned " << session_files.size();
     std::vector<std::pair<std::string, ViewInterface*>> result;
 
     for ( auto file: session_files )
@@ -130,6 +134,15 @@ std::vector<std::pair<std::string, ViewInterface*>> Session::restore(
     *current_file_index = -1;
 
     return result;
+}
+
+void Session::storedGeometry( QByteArray* geometry ) const
+{
+    GetPersistentInfo().retrieve( QString( "session" ) );
+    std::shared_ptr<SessionInfo> session =
+        Persistent<SessionInfo>( "session" );
+
+    *geometry = session->geometry();
 }
 
 std::string Session::getFilename( const ViewInterface* view ) const

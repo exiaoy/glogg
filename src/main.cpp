@@ -62,6 +62,7 @@ int main(int argc, char *argv[])
 
     // Configuration
     bool new_session = false;
+    bool load_session = false;
     bool multi_instance = false;
 #ifdef _WIN32
     bool log_to_file = false;
@@ -75,11 +76,12 @@ int main(int argc, char *argv[])
             ("help,h", "print out program usage (this message)")
             ("version,v", "print glogg's version information")
             ("multi,m", "allow multiple instance of glogg to run simultaneously (use together with -s)")
-            ("new-session,s", "do not load the previous session")
+            ("load-session,s", "load the previous session (default when no file is passed)")
+            ("new-session,n", "do not load the previous session (default when a file is passed)")
 #ifdef _WIN32
             ("log,l", "save the log to a file (Windows only)")
 #endif
-            ("debug,d", "output more debug (include multiple times for more verbosity e.g. -dddd")
+            ("debug,d", "output more debug (include multiple times for more verbosity e.g. -dddd)")
             ;
         po::options_description desc_hidden("Hidden options");
         // For -dd, -ddd...
@@ -128,6 +130,9 @@ int main(int argc, char *argv[])
         if ( vm.count( "new-session" ) )
             new_session = true;
 
+        if ( vm.count( "load-session" ) )
+            load_session = true;
+
 #ifdef _WIN32
         if ( vm.count( "log" ) )
             log_to_file = true;
@@ -159,6 +164,12 @@ int main(int argc, char *argv[])
 #endif
 
     FILELog::setReportingLevel( logLevel );
+
+    if ( ! filename.empty() ) {
+        // Convert to absolute path
+        QFileInfo file( QString::fromStdString( filename ) );
+        filename = file.absoluteFilePath().toStdString();
+    }
 
     // External communicator
     shared_ptr<ExternalCommunicator> externalCommunicator = nullptr;
@@ -217,6 +228,12 @@ int main(int argc, char *argv[])
             std::make_shared<VersionCheckerConfig>(), QString( "versionChecker" ) );
 #endif
 
+#ifdef _WIN32
+    // Allow the app to raise it's own windows (in case an external
+    // glogg send us a file to open)
+    AllowSetForegroundWindow(ASFW_ANY);
+#endif
+
     // FIXME: should be replaced by a two staged init of MainWindow
     GetPersistentInfo().retrieve( QString( "settings" ) );
 
@@ -225,7 +242,8 @@ int main(int argc, char *argv[])
 
     LOG(logDEBUG) << "MainWindow created.";
     mw.show();
-    if ( ! new_session )
+    // Load the existing session if needed
+    if ( load_session || ( filename.empty() && !new_session ) )
         mw.reloadSession();
     mw.loadInitialFile( QString::fromStdString( filename ) );
     mw.startBackgroundTasks();

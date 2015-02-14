@@ -118,6 +118,12 @@ MainWindow::MainWindow( std::unique_ptr<Session> session,
     signalMux_.connect( SIGNAL( loadingFinished( LoadingStatus ) ),
             this, SLOT( handleLoadingFinished( LoadingStatus ) ) );
 
+    // Register for checkbox changes
+    signalMux_.connect( SIGNAL( searchRefreshChanged( int ) ),
+            this, SLOT( handleSearchRefreshChanged( int ) ) );
+    signalMux_.connect( SIGNAL( ignoreCaseChanged( int ) ),
+            this, SLOT( handleIgnoreCaseChanged( int ) ) );
+
     // Configure the main tabbed widget
     mainTabWidget_.setDocumentMode( true );
     mainTabWidget_.setMovable( true );
@@ -177,6 +183,11 @@ MainWindow::MainWindow( std::unique_ptr<Session> session,
 
 void MainWindow::reloadSession()
 {
+    QByteArray geometry;
+
+    session_->storedGeometry( &geometry );
+    restoreGeometry( geometry );
+
     int current_file_index = -1;
 
     for ( auto open_file: session_->restore(
@@ -229,6 +240,15 @@ void MainWindow::createActions()
     openAction->setIcon( QIcon(":/images/open16.png") );
     openAction->setStatusTip(tr("Open a file"));
     connect(openAction, SIGNAL(triggered()), this, SLOT(open()));
+
+    closeAction = new QAction(tr("&Close"), this);
+    closeAction->setShortcut(tr("Ctrl+W"));
+    closeAction->setStatusTip(tr("Close document"));
+    connect(closeAction, SIGNAL(triggered()), this, SLOT(closeTab()));
+
+    closeAllAction = new QAction(tr("Close &All"), this);
+    closeAllAction->setStatusTip(tr("Close all documents"));
+    connect(closeAllAction, SIGNAL(triggered()), this, SLOT(closeAll()));
 
     // Recent files
     for (int i = 0; i < MaxRecentFiles; ++i) {
@@ -317,6 +337,8 @@ void MainWindow::createMenus()
 {
     fileMenu = menuBar()->addMenu( tr("&File") );
     fileMenu->addAction( openAction );
+    fileMenu->addAction( closeAction );
+    fileMenu->addAction( closeAllAction );
     fileMenu->addSeparator();
     for (int i = 0; i < MaxRecentFiles; ++i) {
         fileMenu->addAction( recentFileActions[i] );
@@ -404,6 +426,26 @@ void MainWindow::openRecentFile()
     QAction* action = qobject_cast<QAction*>(sender());
     if (action)
         loadFile(action->data().toString());
+}
+
+// Close current tab
+void MainWindow::closeTab()
+{
+    int currentIndex = mainTabWidget_.currentIndex();
+
+    if ( currentIndex >= 0 )
+    {
+        closeTab(currentIndex);
+    }
+}
+
+// Close all tabs
+void MainWindow::closeAll()
+{
+    while ( mainTabWidget_.count() )
+    {
+        closeTab(0);
+    }
 }
 
 // Select all the text in the currently selected view
@@ -588,6 +630,18 @@ memory to hold the index for this file. The file will now be closed." );
     // mainTabWidget_.setEnabled( true );
 }
 
+void MainWindow::handleSearchRefreshChanged( int state )
+{
+    auto config = Persistent<Configuration>( "settings" );
+    config->setSearchAutoRefreshDefault( state == Qt::Checked );
+}
+
+void MainWindow::handleIgnoreCaseChanged( int state )
+{
+    auto config = Persistent<Configuration>( "settings" );
+    config->setSearchIgnoreCaseDefault( state == Qt::Checked );
+}
+
 void MainWindow::closeTab( int index )
 {
     auto widget = dynamic_cast<CrawlerWidget*>(
@@ -643,6 +697,33 @@ void MainWindow::loadFileNonInteractive( const QString& file_name )
         << file_name.toStdString() << " )";
 
     loadFile( file_name );
+
+    // Try to get the window to the front
+    // This is a bit of a hack but has been tested on:
+    // Qt 5.3 / Gnome / Linux
+    // Qt 4.8 / Win7
+#ifdef _WIN32
+    // Hack copied from http://qt-project.org/forums/viewthread/6164
+    ::SetWindowPos((HWND) effectiveWinId(), HWND_TOPMOST,
+            0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+    ::SetWindowPos((HWND) effectiveWinId(), HWND_NOTOPMOST,
+            0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+#else
+    Qt::WindowFlags window_flags = windowFlags();
+    window_flags |= Qt::WindowStaysOnTopHint;
+    setWindowFlags( window_flags );
+#endif
+
+    activateWindow();
+    raise();
+
+#ifndef _WIN32
+    window_flags = windowFlags();
+    window_flags &= ~Qt::WindowStaysOnTopHint;
+    setWindowFlags( window_flags );
+#endif
+
+    showNormal();
 }
 
 void MainWindow::newVersionNotification( const QString& new_version )
@@ -837,11 +918,7 @@ void MainWindow::writeSettings()
                 0UL,
                 view->context() ) );
     }
-    session_->save( widget_list );
-    //SessionInfo& session = Persistent<SessionInfo>( "session" );
-    //session.setGeometry( saveGeometry() );
-    //session.setCrawlerState( crawlerWidget->saveState() );
-    //GetPersistentInfo().save( QString( "session" ) );
+    session_->save( widget_list, saveGeometry() );
 
     // User settings
     GetPersistentInfo().save( QString( "settings" ) );
@@ -853,7 +930,6 @@ void MainWindow::readSettings()
     // Get and restore the session
     // GetPersistentInfo().retrieve( QString( "session" ) );
     // SessionInfo session = Persistent<SessionInfo>( "session" );
-    //restoreGeometry( session.geometry() );
     /*
      * FIXME: should be in the session
     crawlerWidget->restoreState( session.crawlerState() );

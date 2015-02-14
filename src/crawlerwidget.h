@@ -111,6 +111,11 @@ class CrawlerWidget : public QSplitter,
     // Sent up when the current line number is updated
     void updateLineNumber( int line );
 
+    // "auto-refresh" check has been changed
+    void searchRefreshChanged( int state );
+    // "ignore case" check has been changed
+    void ignoreCaseChanged( int state );
+
   private slots:
     // Instructs the widget to start a search using the current search line.
     void startNewSearch();
@@ -166,6 +171,7 @@ class CrawlerWidget : public QSplitter,
             Static,
             Autorefreshing,
             FileTruncated,
+            TruncatedAutorefreshing,
         };
 
         SearchState() { state_ = NoSearch; autoRefreshRequested_ = false; }
@@ -187,7 +193,9 @@ class CrawlerWidget : public QSplitter,
         State getState() const { return state_; }
         // Is auto-refresh allowed
         bool isAutorefreshAllowed() const
-            { return ( state_ == Autorefreshing ); }
+        { return ( state_ == Autorefreshing || state_ == TruncatedAutorefreshing ); }
+        bool isFileTruncated() const
+        { return ( state_ == FileTruncated || state_ == TruncatedAutorefreshing ); }
 
       private:
         State state_;

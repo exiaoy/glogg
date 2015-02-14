@@ -42,7 +42,6 @@ SOURCES += \
     src/savedsearches.cpp \
     src/infoline.cpp \
     src/menuactiontooltipbehavior.cpp \
-    src/filewatcher.cpp \
     src/selection.cpp \
     src/quickfind.cpp \
     src/quickfindpattern.cpp \
@@ -251,4 +250,26 @@ version_checker {
 }
 else {
     message("Version checker will NOT be included")
+}
+
+# File watching
+linux-g++ {
+    CONFIG += inotify
+}
+
+inotify {
+    message("File watching using inotify")
+    QMAKE_CXXFLAGS += -DGLOGG_SUPPORTS_INOTIFY
+    SOURCES += src/platformfilewatcher.cpp src/inotifywatchtowerdriver.cpp src/watchtower.cpp src/watchtowerlist.cpp
+    HEADERS += src/platformfilewatcher.h src/inotifywatchtowerdriver.h src/watchtower.h src/watchtowerlist.h
+}
+else {
+    win32 {
+        SOURCES += src/platformfilewatcher.cpp src/winwatchtowerdriver.cpp src/watchtower.cpp src/watchtowerlist.cpp
+        HEADERS += src/platformfilewatcher.h src/winwatchtowerdriver.h src/watchtower.h src/watchtowerlist.h
+    }
+    else {
+        SOURCES += src/qtfilewatcher.cpp
+        HEADERS += src/qtfilewatcher.h
+    }
 }

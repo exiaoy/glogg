@@ -31,3 +31,5 @@ object_script.glogg.Release
 
 # app container generated for Mac OS X
 glogg.app/
+# Tests
+tests/build/

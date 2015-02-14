@@ -70,6 +70,8 @@ class MainWindow : public QMainWindow
   private slots:
     void open();
     void openRecentFile();
+    void closeTab();
+    void closeAll();
     void selectAll();
     void copy();
     void find();
@@ -96,6 +98,11 @@ class MainWindow : public QMainWindow
     // without the progress gauge and with file info
     // or an error recovery when loading is finished
     void handleLoadingFinished( LoadingStatus status );
+
+    // Save the new state as default setting when a crawler
+    // is changing their view options.
+    void handleSearchRefreshChanged( int state );
+    void handleIgnoreCaseChanged( int state );
 
     // Close the tab with the passed index
     void closeTab( int index );
@@ -161,6 +168,8 @@ class MainWindow : public QMainWindow
     QToolBar *toolBar;
 
     QAction *openAction;
+    QAction *closeAction;
+    QAction *closeAllAction;
     QAction *exitAction;
     QAction *copyAction;
     QAction *selectAllAction;
