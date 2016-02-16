@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2009, 2010, 2011, 2012, 2013, 2014 Nicolas Bonnefon and other contributors
+ * Copyright (C) 2009, 2010, 2011, 2012, 2013, 2014, 2015 Nicolas Bonnefon and other contributors
  *
  * This file is part of glogg.
  *
@@ -31,7 +31,6 @@
 #include <QFile>
 #include <QLineEdit>
 #include <QFileInfo>
-#include <QKeyEvent>
 #include <QStandardItemModel>
 #include <QHeaderView>
 #include <QListView>
@@ -93,6 +92,10 @@ CrawlerWidget::CrawlerWidget( QWidget *parent )
     // Until we have received confirmation loading is finished, we
     // should consider we are loading something.
     loadingInProgress_ = true;
+    // and it's the first time
+    firstLoadDone_     = false;
+    nbMatches_         = 0;
+    dataStatus_        = DataStatus::OLD_DATA;
 
     currentLineNumber_ = 0;
 }
@@ -114,6 +117,16 @@ QString CrawlerWidget::getSelectedText() const
 void CrawlerWidget::selectAll()
 {
     activeView()->selectAll();
+}
+
+CrawlerWidget::Encoding CrawlerWidget::encodingSetting() const
+{
+    return encodingSetting_;
+}
+
+QString CrawlerWidget::encodingText() const
+{
+    return encoding_text_;
 }
 
 // Return a pointer to the view in which we should do the QuickFind
@@ -157,6 +170,18 @@ void CrawlerWidget::reload()
     printSearchInfoMessage();
 
     logData_->reload();
+
+    // A reload is considered as a first load,
+    // this is to prevent the "new data" icon to be triggered.
+    firstLoadDone_ = false;
+}
+
+void CrawlerWidget::setEncoding( Encoding encoding )
+{
+    encodingSetting_ = encoding;
+    updateEncoding();
+
+    update();
 }
 
 //
@@ -195,7 +220,11 @@ void CrawlerWidget::doSetViewContext(
 
     setSizes( context.sizes() );
     ignoreCaseCheck->setCheckState( context.ignoreCase() ? Qt::Checked : Qt::Unchecked );
-    searchRefreshCheck->setCheckState( context.autoRefresh() ? Qt::Checked : Qt::Unchecked );
+
+    auto auto_refresh_check_state = context.autoRefresh() ? Qt::Checked : Qt::Unchecked;
+    searchRefreshCheck->setCheckState( auto_refresh_check_state );
+    // Manually call the handler as it is not called when changing the state programmatically
+    searchRefreshChangedHandler( auto_refresh_check_state );
 }
 
 std::shared_ptr<const ViewContextInterface>
@@ -259,14 +288,22 @@ void CrawlerWidget::updateFilteredView( int nbMatches, int progress )
         }
     }
 
-    // Recompute the content of the filtered window.
-    filteredView->updateData();
+    // If more matches have been found
+    if ( nbMatches > nbMatches_ ) {
+        nbMatches_ = nbMatches;
 
-    // Update the match overview
-    overview_.updateData( logData_->getNbLine() );
+        // Recompute the content of the filtered window.
+        filteredView->updateData();
 
-    // Also update the top window for the coloured bullets.
-    update();
+        // Update the match overview
+        overview_.updateData( logData_->getNbLine() );
+
+        // New data found icon
+        changeDataStatus( DataStatus::NEW_FILTERED_DATA );
+
+        // Also update the top window for the coloured bullets.
+        update();
+    }
 }
 
 void CrawlerWidget::jumpToMatchingLine(int filteredLineNb)
@@ -283,38 +320,42 @@ void CrawlerWidget::updateLineNumberHandler( int line )
 
 void CrawlerWidget::markLineFromMain( qint64 line )
 {
-    if ( logFilteredData_->isLineMarked( line ) )
-        logFilteredData_->deleteMark( line );
-    else
-        logFilteredData_->addMark( line );
+    if ( line < logData_->getNbLine() ) {
+        if ( logFilteredData_->isLineMarked( line ) )
+            logFilteredData_->deleteMark( line );
+        else
+            logFilteredData_->addMark( line );
 
-    // Recompute the content of the filtered window.
-    filteredView->updateData();
+        // Recompute the content of the filtered window.
+        filteredView->updateData();
 
-    // Update the match overview
-    overview_.updateData( logData_->getNbLine() );
+        // Update the match overview
+        overview_.updateData( logData_->getNbLine() );
 
-    // Also update the top window for the coloured bullets.
-    update();
+        // Also update the top window for the coloured bullets.
+        update();
+    }
 }
 
 void CrawlerWidget::markLineFromFiltered( qint64 line )
 {
-    qint64 line_in_file = logFilteredData_->getMatchingLineNumber( line );
-    if ( logFilteredData_->filteredLineTypeByIndex( line )
-            == LogFilteredData::Mark )
-        logFilteredData_->deleteMark( line_in_file );
-    else
-        logFilteredData_->addMark( line_in_file );
+    if ( line < logFilteredData_->getNbLine() ) {
+        qint64 line_in_file = logFilteredData_->getMatchingLineNumber( line );
+        if ( logFilteredData_->filteredLineTypeByIndex( line )
+                == LogFilteredData::Mark )
+            logFilteredData_->deleteMark( line_in_file );
+        else
+            logFilteredData_->addMark( line_in_file );
 
-    // Recompute the content of the filtered window.
-    filteredView->updateData();
+        // Recompute the content of the filtered window.
+        filteredView->updateData();
 
-    // Update the match overview
-    overview_.updateData( logData_->getNbLine() );
+        // Update the match overview
+        overview_.updateData( logData_->getNbLine() );
 
-    // Also update the top window for the coloured bullets.
-    update();
+        // Also update the top window for the coloured bullets.
+        update();
+    }
 }
 
 void CrawlerWidget::applyConfiguration()
@@ -345,6 +386,10 @@ void CrawlerWidget::applyConfiguration()
     logMainView->update();
     filteredView->updateDisplaySize();
     filteredView->update();
+
+    // Polling interval
+    logData_->setPollingInterval(
+            config->pollingEnabled() ? config->pollIntervalMs() : 0 );
 
     // Update the SearchLine (history)
     updateSearchCombo();
@@ -396,7 +441,16 @@ void CrawlerWidget::loadingFinishedHandler( LoadingStatus status )
             logFilteredData_->updateSearch();
     }
 
+    // Set the encoding for the views
+    updateEncoding();
+
     emit loadingFinished( status );
+
+    // Also change the data available icon
+    if ( firstLoadDone_ )
+        changeDataStatus( DataStatus::NEW_DATA );
+    else
+        firstLoadDone_ = true;
 }
 
 void CrawlerWidget::fileChangedHandler( LogData::MonitoredFileStatus status )
@@ -411,6 +465,7 @@ void CrawlerWidget::fileChangedHandler( LogData::MonitoredFileStatus status )
             filteredView->updateData();
             searchState_.truncateFile();
             printSearchInfoMessage();
+            nbMatches_ = 0;
         }
     }
 }
@@ -497,6 +552,11 @@ void CrawlerWidget::mouseHoveredOverMatch( qint64 line )
     overviewWidget_->highlightLine( line_in_mainview );
 }
 
+void CrawlerWidget::activityDetected()
+{
+    changeDataStatus( DataStatus::OLD_DATA );
+}
+
 //
 // Private functions
 //
@@ -520,6 +580,9 @@ void CrawlerWidget::setup()
 
     overviewWidget_->setOverview( &overview_ );
     overviewWidget_->setParent( logMainView );
+
+    // Connect the search to the top view
+    logMainView->useNewFiltering( logFilteredData_ );
 
     // Construct the visibility button
     visibilityModel_ = new QStandardItemModel( this );
@@ -601,7 +664,7 @@ void CrawlerWidget::setup()
     searchButton->setAutoRaise( true );
 
     stopButton = new QToolButton();
-    stopButton->setIcon( QIcon(":/images/stop16.png") );
+    stopButton->setIcon( QIcon(":/images/stop14.png") );
     stopButton->setAutoRaise( true );
     stopButton->setEnabled( false );
 
@@ -641,6 +704,8 @@ void CrawlerWidget::setup()
     auto config = Persistent<Configuration>( "settings" );
     searchRefreshCheck->setCheckState( config->isSearchAutoRefreshDefault() ?
             Qt::Checked : Qt::Unchecked );
+    // Manually call the handler as it is not called when changing the state programmatically
+    searchRefreshChangedHandler( searchRefreshCheck->checkState() );
     ignoreCaseCheck->setCheckState( config->isSearchIgnoreCaseDefault() ?
             Qt::Checked : Qt::Unchecked );
 
@@ -685,10 +750,16 @@ void CrawlerWidget::setup()
             logMainView, SLOT( followSet( bool ) ) );
     connect(this, SIGNAL( followSet( bool ) ),
             filteredView, SLOT( followSet( bool ) ) );
-    connect(logMainView, SIGNAL( followDisabled() ),
-            this, SIGNAL( followDisabled() ) );
-    connect(filteredView, SIGNAL( followDisabled() ),
-            this, SIGNAL( followDisabled() ) );
+    connect(logMainView, SIGNAL( followModeChanged( bool ) ),
+            this, SIGNAL( followModeChanged( bool ) ) );
+    connect(filteredView, SIGNAL( followModeChanged( bool ) ),
+            this, SIGNAL( followModeChanged( bool ) ) );
+
+    // Detect activity in the views
+    connect(logMainView, SIGNAL( activity() ),
+            this, SLOT( activityDetected() ) );
+    connect(filteredView, SIGNAL( activity() ),
+            this, SLOT( activityDetected() ) );
 
     connect( logFilteredData_, SIGNAL( searchProgressed( int, int ) ),
             this, SLOT( updateFilteredView( int, int ) ) );
@@ -719,6 +790,8 @@ void CrawlerWidget::replaceCurrentSearch( const QString& searchText )
 {
     // Interrupt the search if it's ongoing
     logFilteredData_->interruptSearch();
+
+    nbMatches_ = 0;
 
     // We have to wait for the last search update (100%)
     // before clearing/restarting to avoid having remaining results.
@@ -781,8 +854,6 @@ void CrawlerWidget::replaceCurrentSearch( const QString& searchText )
         searchState_.resetState();
         printSearchInfoMessage();
     }
-    // Connect the search to the top view
-    logMainView->useNewFiltering( logFilteredData_ );
 }
 
 // Updates the content of the drop down list for the saved searches,
@@ -821,6 +892,59 @@ void CrawlerWidget::printSearchInfoMessage( int nbMatches )
 
     searchInfoLine->setPalette( searchInfoLineDefaultPalette );
     searchInfoLine->setText( text );
+}
+
+// Change the data status and, if needed, advise upstream.
+void CrawlerWidget::changeDataStatus( DataStatus status )
+{
+    if ( ( status != dataStatus_ )
+            && (! ( dataStatus_ == DataStatus::NEW_FILTERED_DATA
+                    && status == DataStatus::NEW_DATA ) ) ) {
+        dataStatus_ = status;
+        emit dataStatusChanged( dataStatus_ );
+    }
+}
+
+// Determine the right encoding and set the views.
+void CrawlerWidget::updateEncoding()
+{
+    static const char* latin1_encoding = "iso-8859-1";
+    static const char* utf8_encoding   = "utf-8";
+
+    const char* encoding;
+
+    switch ( encodingSetting_ ) {
+        case ENCODING_AUTO:
+            switch ( logData_->getDetectedEncoding() ) {
+                case EncodingSpeculator::Encoding::ASCII7:
+                    encoding = latin1_encoding;
+                    encoding_text_ = tr( "US-ASCII" );
+                    break;
+                case EncodingSpeculator::Encoding::ASCII8:
+                    encoding = latin1_encoding;
+                    encoding_text_ = tr( "ISO-8859-1" );
+                    break;
+                case EncodingSpeculator::Encoding::UTF8:
+                    encoding = utf8_encoding;
+                    encoding_text_ = tr( "UTF-8" );
+                    break;
+            }
+            break;
+        case ENCODING_UTF8:
+            encoding = utf8_encoding;
+            encoding_text_ = tr( "Displayed as UTF-8" );
+            break;
+        case ENCODING_ISO_8859_1:
+        default:
+            encoding = latin1_encoding;
+            encoding_text_ = tr( "Displayed as ISO-8859-1" );
+            break;
+    }
+
+    logData_->setDisplayEncoding( encoding );
+    logMainView->forceRefresh();
+    logFilteredData_->setDisplayEncoding( encoding );
+    filteredView->forceRefresh();
 }
 
 //

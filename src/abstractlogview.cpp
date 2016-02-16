@@ -1,5 +1,6 @@
 /*
- * Copyright (C) 2009, 2010, 2011, 2012, 2013 Nicolas Bonnefon and other contributors
+ * Copyright (C) 2009, 2010, 2011, 2012, 2013, 2015 Nicolas Bonnefon
+ * and other contributors
  *
  * This file is part of glogg.
  *
@@ -37,6 +38,7 @@
 #include <QMenu>
 #include <QAction>
 #include <QtCore>
+#include <QGestureEvent>
 
 #include "log.h"
 
@@ -47,6 +49,10 @@
 #include "quickfindpattern.h"
 #include "overview.h"
 #include "configuration.h"
+
+namespace {
+int mapPullToFollowLength( int length );
+};
 
 namespace {
 
@@ -232,12 +238,10 @@ void DigitsBuffer::timerEvent( QTimerEvent* event )
     }
 }
 
-// Graphic parameters
-const int AbstractLogView::OVERVIEW_WIDTH = 27;
-
 AbstractLogView::AbstractLogView(const AbstractLogData* newLogData,
         const QuickFindPattern* const quickFindPattern, QWidget* parent) :
     QAbstractScrollArea( parent ),
+    followElasticHook_( HOOK_THRESHOLD ),
     lineNumbersVisible_( false ),
     selectionStartPos_(),
     selectionCurrentEndPos_(),
@@ -254,14 +258,12 @@ AbstractLogView::AbstractLogView(const AbstractLogData* newLogData,
     markingClickInitiated_ = false;
 
     firstLine = 0;
-    lastLine = 0;
     firstCol = 0;
 
     overview_ = NULL;
     overviewWidget_ = NULL;
 
     // Display
-    nbDigitsInLineNumber_ = 0;
     leftMarginPx_ = 0;
 
     // Fonts
@@ -270,8 +272,6 @@ AbstractLogView::AbstractLogView(const AbstractLogData* newLogData,
 
     // Create the viewport QWidget
     setViewport( 0 );
-
-    setAttribute( Qt::WA_StaticContents );  // Does it work?
 
     // Hovering
     setMouseTracking( true );
@@ -283,12 +283,14 @@ AbstractLogView::AbstractLogView(const AbstractLogData* newLogData,
     // Signals
     connect( quickFindPattern_, SIGNAL( patternUpdated() ),
             this, SLOT ( handlePatternUpdated() ) );
-    connect( verticalScrollBar(), SIGNAL( sliderMoved( int ) ),
-            this, SIGNAL( followDisabled() ) );
     connect( &quickFind_, SIGNAL( notify( const QFNotification& ) ),
             this, SIGNAL( notifyQuickFind( const QFNotification& ) ) );
     connect( &quickFind_, SIGNAL( clearNotification() ),
             this, SIGNAL( clearQuickFindNotification() ) );
+    connect( &followElasticHook_, SIGNAL( lengthChanged() ),
+            this, SLOT( repaint() ) );
+    connect( &followElasticHook_, SIGNAL( hooked( bool ) ),
+            this, SIGNAL( followModeChanged( bool ) ) );
 }
 
 AbstractLogView::~AbstractLogView()
@@ -349,6 +351,9 @@ void AbstractLogView::mousePressEvent( QMouseEvent* mouseEvent )
                 selectionCurrentEndPos_ = selectionStartPos_;
             }
         }
+
+        // Invalidate our cache
+        textAreaCache_.invalid_ = true;
     }
     else if ( mouseEvent->button() == Qt::RightButton )
     {
@@ -379,6 +384,8 @@ void AbstractLogView::mousePressEvent( QMouseEvent* mouseEvent )
         // Display the popup (blocking)
         popupMenu_->exec( QCursor::pos() );
     }
+
+    emit activity();
 }
 
 void AbstractLogView::mouseMoveEvent( QMouseEvent* mouseEvent )
@@ -386,6 +393,9 @@ void AbstractLogView::mouseMoveEvent( QMouseEvent* mouseEvent )
     // Selection implementation
     if ( selectionStarted_ )
     {
+        // Invalidate our cache
+        textAreaCache_.invalid_ = true;
+
         QPoint thisEndPos = convertCoordToFilePos( mouseEvent->pos() );
         if ( thisEndPos != selectionCurrentEndPos_ )
         {
@@ -437,8 +447,12 @@ void AbstractLogView::mouseReleaseEvent( QMouseEvent* mouseEvent )
     if ( markingClickInitiated_ ) {
         markingClickInitiated_ = false;
         int line = convertCoordToLine( mouseEvent->y() );
-        if ( line == markingClickLine_ )
+        if ( line == markingClickLine_ ) {
+            // Invalidate our cache
+            textAreaCache_.invalid_ = true;
+
             emit markLine( line );
+        }
     }
     else {
         selectionStarted_ = false;
@@ -452,9 +466,14 @@ void AbstractLogView::mouseDoubleClickEvent( QMouseEvent* mouseEvent )
 {
     if ( mouseEvent->button() == Qt::LeftButton )
     {
+        // Invalidate our cache
+        textAreaCache_.invalid_ = true;
+
         const QPoint pos = convertCoordToFilePos( mouseEvent->pos() );
         selectWordAtPosition( pos );
     }
+
+    emit activity();
 }
 
 void AbstractLogView::timerEvent( QTimerEvent* timerEvent )
@@ -511,7 +530,7 @@ void AbstractLogView::keyPressEvent( QKeyEvent* keyEvent )
     else if ( (keyEvent->key() == Qt::Key_PageDown && controlModifier)
            || (keyEvent->key() == Qt::Key_End && controlModifier) )
     {
-        emit followDisabled(); // duplicate of 'G' action.
+        disableFollow(); // duplicate of 'G' action.
         selection_.selectLine( logData->getNbLine() - 1 );
         emit updateLineNumber( logData->getNbLine() - 1 );
         jumpToBottom();
@@ -519,7 +538,7 @@ void AbstractLogView::keyPressEvent( QKeyEvent* keyEvent )
     else if ( (keyEvent->key() == Qt::Key_PageUp && controlModifier)
            || (keyEvent->key() == Qt::Key_Home && controlModifier) )
     {
-        emit followDisabled(); // like 'g' but 0 input first line action.
+        disableFollow(); // like 'g' but 0 input first line action.
         selectAndDisplayLine( 0 );
         emit updateLineNumber( 0 );
     }
@@ -540,7 +559,7 @@ void AbstractLogView::keyPressEvent( QKeyEvent* keyEvent )
                 case 'j':
                     {
                         int delta = qMax( 1, digitsBuffer_.content() );
-                        emit followDisabled();
+                        disableFollow();
                         //verticalScrollBar()->triggerAction(
                         //QScrollBar::SliderSingleStepAdd);
                         moveSelection( delta );
@@ -549,7 +568,7 @@ void AbstractLogView::keyPressEvent( QKeyEvent* keyEvent )
                 case 'k':
                     {
                         int delta = qMin( -1, - digitsBuffer_.content() );
-                        emit followDisabled();
+                        disableFollow();
                         //verticalScrollBar()->triggerAction(
                         //QScrollBar::SliderSingleStepSub);
                         moveSelection( delta );
@@ -574,13 +593,13 @@ void AbstractLogView::keyPressEvent( QKeyEvent* keyEvent )
                         int newLine = qMax( 0, digitsBuffer_.content() - 1 );
                         if ( newLine >= logData->getNbLine() )
                             newLine = logData->getNbLine() - 1;
-                        emit followDisabled();
+                        disableFollow();
                         selectAndDisplayLine( newLine );
                         emit updateLineNumber( newLine );
                         break;
                     }
                 case 'G':
-                    emit followDisabled();
+                    disableFollow();
                     selection_.selectLine( logData->getNbLine() - 1 );
                     emit updateLineNumber( logData->getNbLine() - 1 );
                     jumpToBottom();
@@ -605,15 +624,50 @@ void AbstractLogView::keyPressEvent( QKeyEvent* keyEvent )
         }
     }
 
-    if ( !keyEvent->isAccepted() )
+    if ( keyEvent->isAccepted() ) {
+        emit activity();
+    }
+    else {
         QAbstractScrollArea::keyPressEvent( keyEvent );
+    }
 }
 
 void AbstractLogView::wheelEvent( QWheelEvent* wheelEvent )
 {
-    emit followDisabled();
+    emit activity();
 
-    QAbstractScrollArea::wheelEvent( wheelEvent );
+    // LOG(logDEBUG) << "wheelEvent";
+
+    // This is to handle the case where follow mode is on, but the user
+    // has moved using the scroll bar. We take them back to the bottom.
+    if ( followMode_ )
+        jumpToBottom();
+
+    int y_delta = 0;
+    if ( verticalScrollBar()->value() == verticalScrollBar()->maximum() ) {
+        // First see if we need to block the elastic (on Mac)
+        if ( wheelEvent->phase() == Qt::ScrollBegin )
+            followElasticHook_.hold();
+        else if ( wheelEvent->phase() == Qt::ScrollEnd )
+            followElasticHook_.release();
+
+        auto pixel_delta = wheelEvent->pixelDelta();
+
+        if ( pixel_delta.isNull() ) {
+            y_delta = wheelEvent->angleDelta().y() / 1.4;
+        }
+        else {
+            y_delta = pixel_delta.y();
+        }
+
+        // LOG(logDEBUG) << "Elastic " << y_delta;
+        followElasticHook_.move( - y_delta );
+    }
+
+    // LOG(logDEBUG) << "Length = " << followElasticHook_.length();
+    if ( followElasticHook_.length() == 0 && !followElasticHook_.isHooked() ) {
+        QAbstractScrollArea::wheelEvent( wheelEvent );
+    }
 }
 
 void AbstractLogView::resizeEvent( QResizeEvent* )
@@ -626,17 +680,39 @@ void AbstractLogView::resizeEvent( QResizeEvent* )
     updateDisplaySize();
 }
 
+bool AbstractLogView::event( QEvent* e )
+{
+    LOG(logDEBUG4) << "Event! Type: " << e->type();
+
+    // Make sure we ignore the gesture events as
+    // they seem to be accepted by default.
+    if ( e->type() == QEvent::Gesture ) {
+        auto gesture_event = dynamic_cast<QGestureEvent*>( e );
+        if ( gesture_event ) {
+            foreach( QGesture* gesture, gesture_event->gestures() ) {
+                LOG(logDEBUG4) << "Gesture: " << gesture->gestureType();
+                gesture_event->ignore( gesture );
+            }
+
+            // Ensure the event is sent up to parents who might care
+            return false;
+        }
+    }
+
+    return QAbstractScrollArea::event( e );
+}
+
 void AbstractLogView::scrollContentsBy( int dx, int dy )
 {
-    LOG(logDEBUG4) << "scrollContentsBy received";
+    LOG(logDEBUG) << "scrollContentsBy received " << dy;
 
-    firstLine = (firstLine - dy) > 0 ? firstLine - dy : 0;
+    firstLine = std::max( static_cast<int32_t>( firstLine ) - dy, 0 );
     firstCol  = (firstCol - dx) > 0 ? firstCol - dx : 0;
-    lastLine = qMin( logData->getNbLine(), firstLine + getNbVisibleLines() );
+    LineNumber last_line  = firstLine + getNbVisibleLines();
 
     // Update the overview if we have one
     if ( overview_ != NULL )
-        overview_->updateCurrentPosition( firstLine, lastLine );
+        overview_->updateCurrentPosition( firstLine, last_line );
 
     // Are we hovering over a new line?
     const QPoint mouse_pos = mapFromGlobal( QCursor::pos() );
@@ -648,253 +724,88 @@ void AbstractLogView::scrollContentsBy( int dx, int dy )
 
 void AbstractLogView::paintEvent( QPaintEvent* paintEvent )
 {
-    QRect invalidRect = paintEvent->rect();
+    const QRect invalidRect = paintEvent->rect();
     if ( (invalidRect.isEmpty()) || (logData == NULL) )
         return;
 
     LOG(logDEBUG4) << "paintEvent received, firstLine=" << firstLine
-        << " lastLine=" << lastLine <<
-        " rect: " << invalidRect.topLeft().x() <<
+        << " rect: " << invalidRect.topLeft().x() <<
         ", " << invalidRect.topLeft().y() <<
         ", " << invalidRect.bottomRight().x() <<
         ", " << invalidRect.bottomRight().y();
 
-    {
-        // Repaint the viewport
-        QPainter painter( viewport() );
-        const int fontHeight = charHeight_;
-        const int fontAscent = painter.fontMetrics().ascent();
-        const int nbCols = getNbVisibleCols();
-        const QPalette& palette = viewport()->palette();
-        std::shared_ptr<const FilterSet> filterSet =
-            Persistent<FilterSet>( "filterSet" );
-        QColor foreColor, backColor;
-
-        static const QBrush normalBulletBrush = QBrush( Qt::white );
-        static const QBrush matchBulletBrush = QBrush( Qt::red );
-        static const QBrush markBrush = QBrush( "dodgerblue" );
-
-        static const int SEPARATOR_WIDTH = 1;
-        static const int BULLET_AREA_WIDTH = 11;
-        static const int CONTENT_MARGIN_WIDTH = 1;
-        static const int LINE_NUMBER_PADDING = 3;
-
-        // First check the lines to be drawn are within range (might not be the case if
-        // the file has just changed)
-        const int nbLines = logData->getNbLine();
-        if ( nbLines == 0 ) {
-            return;
-        }
-        else {
-            if ( firstLine >= nbLines )
-                firstLine = nbLines - 1;
-            if ( lastLine >= nbLines )
-                lastLine =  nbLines - 1;
-        }
-
-        // Lines to write
-        const QStringList lines = logData->getExpandedLines( firstLine, lastLine - firstLine + 1 );
-
-        // First draw the bullet left margin
-        painter.setPen(palette.color(QPalette::Text));
-        painter.drawLine( BULLET_AREA_WIDTH, 0,
-                          BULLET_AREA_WIDTH, viewport()->height() );
-        painter.fillRect( 0, 0,
-                          BULLET_AREA_WIDTH, viewport()->height(),
-                          Qt::darkGray );
-
-        // Column at which the content should start (pixels)
-        int contentStartPosX = BULLET_AREA_WIDTH + SEPARATOR_WIDTH;
-
-        // This is also the bullet zone width, used for marking clicks
-        bulletZoneWidthPx_ = contentStartPosX;
-
-        // Draw the line numbers area
-        int lineNumberAreaStartX = 0;
-        if ( lineNumbersVisible_ ) {
-            int lineNumberWidth = charWidth_ * nbDigitsInLineNumber_;
-            int lineNumberAreaWidth =
-                2 * LINE_NUMBER_PADDING + lineNumberWidth;
-            lineNumberAreaStartX = contentStartPosX;
-
-            painter.setPen(palette.color(QPalette::Text));
-            /* Not sure if it looks good...
-            painter.drawLine( contentStartPosX + lineNumberAreaWidth,
-                              0,
-                              contentStartPosX + lineNumberAreaWidth,
-                              viewport()->height() );
-            */
-            painter.fillRect( contentStartPosX, 0,
-                              lineNumberAreaWidth, viewport()->height(),
-                              Qt::lightGray );
-
-            // Update for drawing the actual text
-            contentStartPosX += lineNumberAreaWidth;
-        }
-        else {
-            contentStartPosX += SEPARATOR_WIDTH;
-        }
-
-        // This is the total width of the 'margin' (including line number if any)
-        // used for mouse calculation etc...
-        leftMarginPx_ = contentStartPosX;
-
-        // Then draw each line
-        for (int i = firstLine; i <= lastLine; i++) {
-            // Position in pixel of the base line of the line to print
-            const int yPos = (i-firstLine) * fontHeight;
-            const int xPos = contentStartPosX + CONTENT_MARGIN_WIDTH;
-
-            // string to print, cut to fit the length and position of the view
-            const QString line = lines[i - firstLine];
-            const QString cutLine = line.mid( firstCol, nbCols );
-
-            if ( selection_.isLineSelected( i ) ) {
-                // Reverse the selected line
-                foreColor = palette.color( QPalette::HighlightedText );
-                backColor = palette.color( QPalette::Highlight );
-                painter.setPen(palette.color(QPalette::Text));
-            }
-            else if ( filterSet->matchLine( logData->getLineString( i ),
-                        &foreColor, &backColor ) ) {
-                // Apply a filter to the line
-            }
-            else {
-                // Use the default colors
-                foreColor = palette.color( QPalette::Text );
-                backColor = palette.color( QPalette::Base );
-            }
-
-            // Is there something selected in the line?
-            int sel_start, sel_end;
-            bool isSelection =
-                selection_.getPortionForLine( i, &sel_start, &sel_end );
-            // Has the line got elements to be highlighted
-            QList<QuickFindMatch> qfMatchList;
-            bool isMatch =
-                quickFindPattern_->matchLine( line, qfMatchList );
-
-            if ( isSelection || isMatch ) {
-                // We use the LineDrawer and its chunks because the
-                // line has to be somehow highlighted
-                LineDrawer lineDrawer( backColor );
-
-                // First we create a list of chunks with the highlights
-                QList<LineChunk> chunkList;
-                int column = 0; // Current column in line space
-                foreach( const QuickFindMatch match, qfMatchList ) {
-                    int start = match.startColumn() - firstCol;
-                    int end = start + match.length();
-                    // Ignore matches that are *completely* outside view area
-                    if ( ( start < 0 && end < 0 ) || start >= nbCols )
-                        continue;
-                    if ( start > column )
-                        chunkList << LineChunk( column, start - 1, LineChunk::Normal );
-                    column = qMin( start + match.length() - 1, nbCols );
-                    chunkList << LineChunk( qMax( start, 0 ), column,
-                                            LineChunk::Highlighted );
-                    column++;
-                }
-                if ( column <= cutLine.length() - 1 )
-                    chunkList << LineChunk( column, cutLine.length() - 1, LineChunk::Normal );
-
-                // Then we add the selection if needed
-                QList<LineChunk> newChunkList;
-                if ( isSelection ) {
-                    sel_start -= firstCol; // coord in line space
-                    sel_end   -= firstCol;
-
-                    foreach ( const LineChunk chunk, chunkList ) {
-                        newChunkList << chunk.select( sel_start, sel_end );
-                    }
-                }
-                else
-                    newChunkList = chunkList;
-
-                foreach ( const LineChunk chunk, newChunkList ) {
-                    // Select the colours
-                    QColor fore;
-                    QColor back;
-                    switch ( chunk.type() ) {
-                        case LineChunk::Normal:
-                            fore = foreColor;
-                            back = backColor;
-                            break;
-                        case LineChunk::Highlighted:
-                            fore = QColor( "black" );
-                            back = QColor( "yellow" );
-                            // fore = highlightForeColor;
-                            // back = highlightBackColor;
-                            break;
-                        case LineChunk::Selected:
-                            fore = palette.color( QPalette::HighlightedText ),
-                            back = palette.color( QPalette::Highlight );
-                            break;
-                    }
-                    lineDrawer.addChunk ( chunk, fore, back );
-                }
-
-                lineDrawer.draw( painter, xPos, yPos,
-                                 viewport()->width(), cutLine,
-                                 CONTENT_MARGIN_WIDTH );
-            }
-            else {
-                // Nothing to be highlighted, we print the whole line!
-                painter.fillRect( xPos - CONTENT_MARGIN_WIDTH, yPos,
-                        viewport()->width(), fontHeight, backColor );
-                // (the rectangle is extended on the left to cover the small
-                // margin, it looks better (LineDrawer does the same) )
-                painter.setPen( foreColor );
-                painter.drawText( xPos, yPos + fontAscent, cutLine );
-            }
-
-            // Then draw the bullet
-            painter.setPen( palette.color( QPalette::Text ) );
-            const int circleSize = 3;
-            const int arrowHeight = 4;
-            const int middleXLine = BULLET_AREA_WIDTH / 2;
-            const int middleYLine = yPos + (fontHeight / 2);
-
-            const LineType line_type = lineType( i );
-            if ( line_type == Marked ) {
-                // A pretty arrow if the line is marked
-                const QPoint points[7] = {
-                    QPoint(1, middleYLine - 2),
-                    QPoint(middleXLine, middleYLine - 2),
-                    QPoint(middleXLine, middleYLine - arrowHeight),
-                    QPoint(BULLET_AREA_WIDTH - 2, middleYLine),
-                    QPoint(middleXLine, middleYLine + arrowHeight),
-                    QPoint(middleXLine, middleYLine + 2),
-                    QPoint(1, middleYLine + 2 ),
-                };
-
-                painter.setBrush( markBrush );
-                painter.drawPolygon( points, 7 );
-            }
-            else {
-                if ( lineType( i ) == Match )
-                    painter.setBrush( matchBulletBrush );
-                else
-                    painter.setBrush( normalBulletBrush );
-                painter.drawEllipse( middleXLine - circleSize,
-                        middleYLine - circleSize,
-                        circleSize * 2, circleSize * 2 );
-            }
-
-            // Draw the line number
-            if ( lineNumbersVisible_ ) {
-                static const QString lineNumberFormat( "%1" );
-                const QString& lineNumberStr =
-                    lineNumberFormat.arg( displayLineNumber( i ),
-                                          nbDigitsInLineNumber_ );
-                painter.setPen( palette.color( QPalette::Text ) );
-                painter.drawText( lineNumberAreaStartX + LINE_NUMBER_PADDING,
-                                  yPos + fontAscent, lineNumberStr );
-            }
-
-        } // For each line
+#ifdef GLOGG_PERF_MEASURE_FPS
+    static uint32_t maxline = logData->getNbLine();
+    if ( ! perfCounter_.addEvent() && logData->getNbLine() > maxline ) {
+        LOG(logWARNING) << "Redraw per second: " << perfCounter_.readAndReset()
+            << " lines: " << logData->getNbLine();
+        perfCounter_.addEvent();
+        maxline = logData->getNbLine();
     }
-    LOG(logDEBUG4) << "End of repaint";
+#endif
+
+    auto start = std::chrono::system_clock::now();
+
+    // Can we use our cache?
+    int32_t delta_y = textAreaCache_.first_line_ - firstLine;
+
+    if ( textAreaCache_.invalid_ || ( textAreaCache_.first_column_ != firstCol ) ) {
+        // Force a full redraw
+        delta_y = INT32_MAX;
+    }
+
+    if ( delta_y != 0 ) {
+        // Full or partial redraw
+        drawTextArea( &textAreaCache_.pixmap_, delta_y );
+
+        textAreaCache_.invalid_      = false;
+        textAreaCache_.first_line_   = firstLine;
+        textAreaCache_.first_column_ = firstCol;
+
+        LOG(logDEBUG) << "End of writing " <<
+            std::chrono::duration_cast<std::chrono::microseconds>
+            ( std::chrono::system_clock::now() - start ).count();
+    }
+    else {
+        // Use the cache as is: nothing to do!
+    }
+
+    // Height including the potentially invisible last line
+    const int wholeHeight = getNbVisibleLines() * charHeight_;
+    // Height in pixels of the "pull to follow" bottom bar.
+    pullToFollowHeight_ = mapPullToFollowLength( followElasticHook_.length() )
+        + ( followElasticHook_.isHooked() ?
+                ( wholeHeight - viewport()->height() ) + PULL_TO_FOLLOW_HOOKED_HEIGHT : 0 );
+
+    if ( pullToFollowHeight_
+            && ( pullToFollowCache_.nb_columns_ != getNbVisibleCols() ) ) {
+        LOG(logDEBUG) << "Drawing pull to follow bar";
+        pullToFollowCache_.pixmap_ = drawPullToFollowBar(
+                viewport()->width(), viewport()->devicePixelRatio() );
+        pullToFollowCache_.nb_columns_ = getNbVisibleCols();
+    }
+
+    QPainter devicePainter( viewport() );
+    int drawingTopPosition = - pullToFollowHeight_;
+
+    // This is to cover the special case where there is less than a screenful
+    // worth of data, we want to see the document from the top, rather than
+    // pushing the first couple of lines above the viewport.
+    if ( followElasticHook_.isHooked() && ( logData->getNbLine() < getNbVisibleLines() ) )
+        drawingTopPosition += ( wholeHeight - viewport()->height() + PULL_TO_FOLLOW_HOOKED_HEIGHT );
+
+    devicePainter.drawPixmap( 0, drawingTopPosition, textAreaCache_.pixmap_ );
+
+    // Draw the "pull to follow" zone if needed
+    if ( pullToFollowHeight_ ) {
+        devicePainter.drawPixmap( 0,
+                getNbVisibleLines() * charHeight_ - pullToFollowHeight_,
+                pullToFollowCache_.pixmap_ );
+    }
+
+    LOG(logDEBUG) << "End of repaint " <<
+        std::chrono::duration_cast<std::chrono::microseconds>
+        ( std::chrono::system_clock::now() - start ).count();
 }
 
 // These two functions are virtual and this implementation is clearly
@@ -928,7 +839,7 @@ void AbstractLogView::setOverview( Overview* overview,
 void AbstractLogView::searchUsingFunction(
         qint64 (QuickFind::*search_function)() )
 {
-    emit followDisabled();
+    disableFollow();
 
     int line = (quickFind_.*search_function)();
     if ( line >= 0 ) {
@@ -974,6 +885,8 @@ void AbstractLogView::incrementalSearchStop()
 void AbstractLogView::followSet( bool checked )
 {
     followMode_ = checked;
+    followElasticHook_.hook( checked );
+    update();
     if ( checked )
         jumpToBottom();
 }
@@ -1065,12 +978,11 @@ void AbstractLogView::updateData()
     selection_.crop( logData->getNbLine() - 1 );
 
     // Adapt the scroll bars to the new content
-    verticalScrollBar()->setRange( 0, logData->getNbLine()-1 );
-    const int hScrollMaxValue = ( logData->getMaxLength() - getNbVisibleCols() + 1 ) > 0 ?
-        ( logData->getMaxLength() - getNbVisibleCols() + 1 ) : 0;
-    horizontalScrollBar()->setRange( 0, hScrollMaxValue );
+    updateScrollBars();
 
-    lastLine = qMin( logData->getNbLine(), firstLine + getNbVisibleLines() );
+    // Calculate the index of the last line shown
+    LineNumber last_line = std::min( static_cast<int64_t>( logData->getNbLine() ),
+            static_cast<int64_t>( firstLine + getNbVisibleLines() ) );
 
     // Reset the QuickFind in case we have new stuff to search into
     quickFind_.resetLimits();
@@ -1080,10 +992,10 @@ void AbstractLogView::updateData()
 
     // Update the overview if we have one
     if ( overview_ != NULL )
-        overview_->updateCurrentPosition( firstLine, lastLine );
+        overview_->updateCurrentPosition( firstLine, last_line );
 
-    // Update the length of line numbers
-    nbDigitsInLineNumber_ = countDigits( maxDisplayLineNumber() );
+    // Invalidate our cache
+    textAreaCache_.invalid_ = true;
 
     // Repaint!
     update();
@@ -1098,15 +1010,12 @@ void AbstractLogView::updateDisplaySize()
     // following give the right result, not sure why:
     charWidth_ = fm.width( QChar('a') );
 
-    // Calculate the index of the last line shown
-    lastLine = qMin( logData->getNbLine(), firstLine + getNbVisibleLines() );
-
     // Update the scroll bars
+    updateScrollBars();
     verticalScrollBar()->setPageStep( getNbVisibleLines() );
 
-    const int hScrollMaxValue = ( logData->getMaxLength() - getNbVisibleCols() + 1 ) > 0 ?
-        ( logData->getMaxLength() - getNbVisibleCols() + 1 ) : 0;
-    horizontalScrollBar()->setRange( 0, hScrollMaxValue );
+    if ( followMode_ )
+        jumpToBottom();
 
     LOG(logDEBUG) << "viewport.width()=" << viewport()->width();
     LOG(logDEBUG) << "viewport.height()=" << viewport()->height();
@@ -1116,6 +1025,13 @@ void AbstractLogView::updateDisplaySize()
     if ( overviewWidget_ )
         overviewWidget_->setGeometry( viewport()->width() + 2, 1,
                 OVERVIEW_WIDTH - 1, viewport()->height() );
+
+    // Our text area cache is now invalid
+    textAreaCache_.invalid_ = true;
+    textAreaCache_.pixmap_  = QPixmap {
+        viewport()->width() * viewport()->devicePixelRatio(),
+        static_cast<int32_t>( getNbVisibleLines() ) * charHeight_ * viewport()->devicePixelRatio() };
+    textAreaCache_.pixmap_.setDevicePixelRatio( viewport()->devicePixelRatio() );
 }
 
 int AbstractLogView::getTopLine() const
@@ -1136,7 +1052,7 @@ void AbstractLogView::selectAll()
 
 void AbstractLogView::selectAndDisplayLine( int line )
 {
-    emit followDisabled();
+    disableFollow();
     selection_.selectLine( line );
     displayLine( line );
     emit updateLineNumber( line );
@@ -1160,14 +1076,20 @@ void AbstractLogView::setLineNumbersVisible( bool lineNumbersVisible )
     lineNumbersVisible_ = lineNumbersVisible;
 }
 
+void AbstractLogView::forceRefresh()
+{
+    // Invalidate our cache
+    textAreaCache_.invalid_ = true;
+}
+
 //
 // Private functions
 //
 
 // Returns the number of lines visible in the viewport
-int AbstractLogView::getNbVisibleLines() const
+LineNumber AbstractLogView::getNbVisibleLines() const
 {
-    return viewport()->height() / charHeight_ + 1;
+    return static_cast<LineNumber>( viewport()->height() / charHeight_ + 1 );
 }
 
 // Returns the number of columns visible in the viewport
@@ -1179,7 +1101,7 @@ int AbstractLogView::getNbVisibleCols() const
 // Converts the mouse x, y coordinates to the line number in the file
 int AbstractLogView::convertCoordToLine(int yPos) const
 {
-    int line = firstLine + yPos / charHeight_;
+    int line = firstLine + ( yPos + pullToFollowHeight_ ) / charHeight_;
 
     return line;
 }
@@ -1188,7 +1110,7 @@ int AbstractLogView::convertCoordToLine(int yPos) const
 // This function ensure the pos exists in the file.
 QPoint AbstractLogView::convertCoordToFilePos( const QPoint& pos ) const
 {
-    int line = firstLine + pos.y() / charHeight_;
+    int line = firstLine + ( pos.y() + pullToFollowHeight_ ) / charHeight_;
     if ( line >= logData->getNbLine() )
         line = logData->getNbLine() - 1;
     if ( line < 0 )
@@ -1214,11 +1136,14 @@ QPoint AbstractLogView::convertCoordToFilePos( const QPoint& pos ) const
 
 // Makes the widget adjust itself to display the passed line.
 // Doing so, it will throw itself a scrollContents event.
-void AbstractLogView::displayLine( int line )
+void AbstractLogView::displayLine( LineNumber line )
 {
     // If the line is already the screen
     if ( ( line >= firstLine ) &&
          ( line < ( firstLine + getNbVisibleLines() ) ) ) {
+        // Invalidate our cache
+        textAreaCache_.invalid_ = true;
+
         // ... don't scroll and just repaint
         update();
     } else {
@@ -1283,7 +1208,7 @@ void AbstractLogView::jumpToRightOfScreen()
 
     // Search the longest line on screen
     int max_length = 0;
-    for ( int i = firstLine; i <= ( firstLine + getNbVisibleLines() ); i++ ) {
+    for ( auto i = firstLine; i <= ( firstLine + getNbVisibleLines() ); i++ ) {
         int length = logData->getLineLength( i );
         if ( length > max_length )
             max_length = length;
@@ -1424,3 +1349,324 @@ void AbstractLogView::considerMouseHovering( int x_pos, int y_pos )
         }
     }
 }
+
+void AbstractLogView::updateScrollBars()
+{
+    verticalScrollBar()->setRange( 0, std::max( 0LL,
+            logData->getNbLine() - getNbVisibleLines() ) );
+
+    const int hScrollMaxValue = std::max( 0,
+            logData->getMaxLength() - getNbVisibleCols() + 1 );
+    horizontalScrollBar()->setRange( 0, hScrollMaxValue );
+}
+
+void AbstractLogView::drawTextArea( QPaintDevice* paint_device, int32_t delta_y )
+{
+    // LOG( logDEBUG ) << "devicePixelRatio: " << viewport()->devicePixelRatio();
+    // LOG( logDEBUG ) << "viewport size: " << viewport()->size().width();
+    // LOG( logDEBUG ) << "pixmap size: " << textPixmap.width();
+    // Repaint the viewport
+    QPainter painter( paint_device );
+    // LOG( logDEBUG ) << "font: " << viewport()->font().family().toStdString();
+    // LOG( logDEBUG ) << "font painter: " << painter.font().family().toStdString();
+
+    painter.setFont( this->font() );
+
+    const int fontHeight = charHeight_;
+    const int fontAscent = painter.fontMetrics().ascent();
+    const int nbCols = getNbVisibleCols();
+    const int paintDeviceHeight = paint_device->height() / viewport()->devicePixelRatio();
+    const int paintDeviceWidth = paint_device->width() / viewport()->devicePixelRatio();
+    const QPalette& palette = viewport()->palette();
+    std::shared_ptr<const FilterSet> filterSet =
+        Persistent<FilterSet>( "filterSet" );
+    QColor foreColor, backColor;
+
+    static const QBrush normalBulletBrush = QBrush( Qt::white );
+    static const QBrush matchBulletBrush = QBrush( Qt::red );
+    static const QBrush markBrush = QBrush( "dodgerblue" );
+
+    static const int SEPARATOR_WIDTH = 1;
+    static const qreal BULLET_AREA_WIDTH = 11;
+    static const int CONTENT_MARGIN_WIDTH = 1;
+    static const int LINE_NUMBER_PADDING = 3;
+
+    // First check the lines to be drawn are within range (might not be the case if
+    // the file has just changed)
+    const int64_t lines_in_file = logData->getNbLine();
+
+    if ( firstLine > lines_in_file )
+        firstLine = lines_in_file - 1;
+
+    const int64_t nbLines = std::min(
+            static_cast<int64_t>( getNbVisibleLines() ), lines_in_file - firstLine );
+
+    const int bottomOfTextPx = nbLines * fontHeight;
+
+    LOG(logDEBUG) << "drawing lines from " << firstLine << " (" << nbLines << " lines)";
+    LOG(logDEBUG) << "bottomOfTextPx: " << bottomOfTextPx;
+    LOG(logDEBUG) << "Height: " << paintDeviceHeight;
+
+    // Lines to write
+    const QStringList lines = logData->getExpandedLines( firstLine, nbLines );
+
+    // First draw the bullet left margin
+    painter.setPen(palette.color(QPalette::Text));
+    painter.fillRect( 0, 0,
+                      BULLET_AREA_WIDTH, paintDeviceHeight,
+                      Qt::darkGray );
+
+    // Column at which the content should start (pixels)
+    qreal contentStartPosX = BULLET_AREA_WIDTH + SEPARATOR_WIDTH;
+
+    // This is also the bullet zone width, used for marking clicks
+    bulletZoneWidthPx_ = contentStartPosX;
+
+    // Update the length of line numbers
+    const int nbDigitsInLineNumber = countDigits( maxDisplayLineNumber() );
+
+    // Draw the line numbers area
+    int lineNumberAreaStartX = 0;
+    if ( lineNumbersVisible_ ) {
+        int lineNumberWidth = charWidth_ * nbDigitsInLineNumber;
+        int lineNumberAreaWidth =
+            2 * LINE_NUMBER_PADDING + lineNumberWidth;
+        lineNumberAreaStartX = contentStartPosX;
+
+        painter.setPen(palette.color(QPalette::Text));
+        /* Not sure if it looks good...
+        painter.drawLine( contentStartPosX + lineNumberAreaWidth,
+                          0,
+                          contentStartPosX + lineNumberAreaWidth,
+                          viewport()->height() );
+        */
+        painter.fillRect( contentStartPosX - SEPARATOR_WIDTH, 0,
+                          lineNumberAreaWidth + SEPARATOR_WIDTH, paintDeviceHeight,
+                          Qt::lightGray );
+
+        // Update for drawing the actual text
+        contentStartPosX += lineNumberAreaWidth;
+    }
+    else {
+        painter.fillRect( contentStartPosX - SEPARATOR_WIDTH, 0,
+                          SEPARATOR_WIDTH + 1, paintDeviceHeight,
+                          Qt::lightGray );
+        // contentStartPosX += SEPARATOR_WIDTH;
+    }
+
+    painter.drawLine( BULLET_AREA_WIDTH, 0,
+                      BULLET_AREA_WIDTH, paintDeviceHeight - 1 );
+
+    // This is the total width of the 'margin' (including line number if any)
+    // used for mouse calculation etc...
+    leftMarginPx_ = contentStartPosX + SEPARATOR_WIDTH;
+
+    // Then draw each line
+    for (int i = 0; i < nbLines; i++) {
+        const LineNumber line_index = i + firstLine;
+
+        // Position in pixel of the base line of the line to print
+        const int yPos = i * fontHeight;
+        const int xPos = contentStartPosX + CONTENT_MARGIN_WIDTH;
+
+        // string to print, cut to fit the length and position of the view
+        const QString line = lines[i];
+        const QString cutLine = line.mid( firstCol, nbCols );
+
+        if ( selection_.isLineSelected( line_index ) ) {
+            // Reverse the selected line
+            foreColor = palette.color( QPalette::HighlightedText );
+            backColor = palette.color( QPalette::Highlight );
+            painter.setPen(palette.color(QPalette::Text));
+        }
+        else if ( filterSet->matchLine( logData->getLineString( line_index ),
+                    &foreColor, &backColor ) ) {
+            // Apply a filter to the line
+        }
+        else {
+            // Use the default colors
+            foreColor = palette.color( QPalette::Text );
+            backColor = palette.color( QPalette::Base );
+        }
+
+        // Is there something selected in the line?
+        int sel_start, sel_end;
+        bool isSelection =
+            selection_.getPortionForLine( line_index, &sel_start, &sel_end );
+        // Has the line got elements to be highlighted
+        QList<QuickFindMatch> qfMatchList;
+        bool isMatch =
+            quickFindPattern_->matchLine( line, qfMatchList );
+
+        if ( isSelection || isMatch ) {
+            // We use the LineDrawer and its chunks because the
+            // line has to be somehow highlighted
+            LineDrawer lineDrawer( backColor );
+
+            // First we create a list of chunks with the highlights
+            QList<LineChunk> chunkList;
+            int column = 0; // Current column in line space
+            foreach( const QuickFindMatch match, qfMatchList ) {
+                int start = match.startColumn() - firstCol;
+                int end = start + match.length();
+                // Ignore matches that are *completely* outside view area
+                if ( ( start < 0 && end < 0 ) || start >= nbCols )
+                    continue;
+                if ( start > column )
+                    chunkList << LineChunk( column, start - 1, LineChunk::Normal );
+                column = qMin( start + match.length() - 1, nbCols );
+                chunkList << LineChunk( qMax( start, 0 ), column,
+                        LineChunk::Highlighted );
+                column++;
+            }
+            if ( column <= cutLine.length() - 1 )
+                chunkList << LineChunk( column, cutLine.length() - 1, LineChunk::Normal );
+
+            // Then we add the selection if needed
+            QList<LineChunk> newChunkList;
+            if ( isSelection ) {
+                sel_start -= firstCol; // coord in line space
+                sel_end   -= firstCol;
+
+                foreach ( const LineChunk chunk, chunkList ) {
+                    newChunkList << chunk.select( sel_start, sel_end );
+                }
+            }
+            else
+                newChunkList = chunkList;
+
+            foreach ( const LineChunk chunk, newChunkList ) {
+                // Select the colours
+                QColor fore;
+                QColor back;
+                switch ( chunk.type() ) {
+                    case LineChunk::Normal:
+                        fore = foreColor;
+                        back = backColor;
+                        break;
+                    case LineChunk::Highlighted:
+                        fore = QColor( "black" );
+                        back = QColor( "yellow" );
+                        // fore = highlightForeColor;
+                        // back = highlightBackColor;
+                        break;
+                    case LineChunk::Selected:
+                        fore = palette.color( QPalette::HighlightedText ),
+                             back = palette.color( QPalette::Highlight );
+                        break;
+                }
+                lineDrawer.addChunk ( chunk, fore, back );
+            }
+
+            lineDrawer.draw( painter, xPos, yPos,
+                    viewport()->width(), cutLine,
+                    CONTENT_MARGIN_WIDTH );
+        }
+        else {
+            // Nothing to be highlighted, we print the whole line!
+            painter.fillRect( xPos - CONTENT_MARGIN_WIDTH, yPos,
+                    viewport()->width(), fontHeight, backColor );
+            // (the rectangle is extended on the left to cover the small
+            // margin, it looks better (LineDrawer does the same) )
+            painter.setPen( foreColor );
+            painter.drawText( xPos, yPos + fontAscent, cutLine );
+        }
+
+        // Then draw the bullet
+        painter.setPen( palette.color( QPalette::Text ) );
+        const qreal circleSize = 3;
+        const qreal arrowHeight = 4;
+        const qreal middleXLine = BULLET_AREA_WIDTH / 2;
+        const qreal middleYLine = yPos + (fontHeight / 2);
+
+        const LineType line_type = lineType( line_index );
+        if ( line_type == Marked ) {
+            // A pretty arrow if the line is marked
+            const QPointF points[7] = {
+                QPointF(1, middleYLine - 2),
+                QPointF(middleXLine, middleYLine - 2),
+                QPointF(middleXLine, middleYLine - arrowHeight),
+                QPointF(BULLET_AREA_WIDTH - 1, middleYLine),
+                QPointF(middleXLine, middleYLine + arrowHeight),
+                QPointF(middleXLine, middleYLine + 2),
+                QPointF(1, middleYLine + 2 ),
+            };
+
+            painter.setBrush( markBrush );
+            painter.drawPolygon( points, 7 );
+        }
+        else {
+            // For pretty circles
+            painter.setRenderHint( QPainter::Antialiasing );
+
+            if ( lineType( line_index ) == Match )
+                painter.setBrush( matchBulletBrush );
+            else
+                painter.setBrush( normalBulletBrush );
+            painter.drawEllipse( middleXLine - circleSize,
+                    middleYLine - circleSize,
+                    circleSize * 2, circleSize * 2 );
+        }
+
+        // Draw the line number
+        if ( lineNumbersVisible_ ) {
+            static const QString lineNumberFormat( "%1" );
+            const QString& lineNumberStr =
+                lineNumberFormat.arg( displayLineNumber( line_index ),
+                        nbDigitsInLineNumber );
+            painter.setPen( palette.color( QPalette::Text ) );
+            painter.drawText( lineNumberAreaStartX + LINE_NUMBER_PADDING,
+                    yPos + fontAscent, lineNumberStr );
+        }
+    } // For each line
+
+    if ( bottomOfTextPx < paintDeviceHeight ) {
+        // The lines don't cover the whole device
+        painter.fillRect( contentStartPosX, bottomOfTextPx,
+                paintDeviceWidth - contentStartPosX,
+                paintDeviceHeight, palette.color( QPalette::Window ) );
+    }
+}
+
+// Draw the "pull to follow" bar and return a pixmap.
+// The width is passed in "logic" pixels.
+QPixmap AbstractLogView::drawPullToFollowBar( int width, float pixel_ratio )
+{
+    static constexpr int barWidth = 40;
+    QPixmap pixmap ( static_cast<float>( width ) * pixel_ratio, barWidth * 6.0 );
+    pixmap.setDevicePixelRatio( pixel_ratio );
+    pixmap.fill( this->palette().color( this->backgroundRole() ) );
+    const int nbBars = width / (barWidth * 2) + 1;
+
+    QPainter painter( &pixmap );
+    painter.setPen( QPen( QColor( 0, 0, 0, 0 ) ) );
+    painter.setBrush( QBrush( QColor( "lightyellow" ) ) );
+
+    for ( int i = 0; i < nbBars; ++i ) {
+        QPoint points[4] = {
+            { (i*2+1)*barWidth, 0 },
+            { 0, (i*2+1)*barWidth },
+            { 0, (i+1)*2*barWidth },
+            { (i+1)*2*barWidth, 0 }
+        };
+        painter.drawConvexPolygon( points, 4 );
+    }
+
+    return pixmap;
+}
+
+void AbstractLogView::disableFollow()
+{
+    emit followModeChanged( false );
+    followElasticHook_.hook( false );
+}
+
+namespace {
+
+// Convert the length of the pull to follow bar to pixels
+int mapPullToFollowLength( int length )
+{
+    return length / 14;
+}
+
+};

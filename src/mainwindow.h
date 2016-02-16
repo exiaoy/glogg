@@ -35,6 +35,7 @@
 #endif
 
 class QAction;
+class QActionGroup;
 class Session;
 class RecentFiles;
 class MenuActionToolTipBehavior;
@@ -79,14 +80,15 @@ class MainWindow : public QMainWindow
     void options();
     void about();
     void aboutQt();
+    void encodingChanged( QAction* action );
 
     // Change the view settings
     void toggleOverviewVisibility( bool isVisible );
     void toggleMainLineNumbersVisibility( bool isVisible );
     void toggleFilteredLineNumbersVisibility( bool isVisible );
 
-    // Disable the follow mode checkbox and send the followSet signal down
-    void disableFollow();
+    // Change the follow mode checkbox and send the followSet signal down
+    void changeFollowMode( bool follow );
 
     // Update the line number displayed in the status bar.
     // Must be passed as the internal (starts at 0) line number.
@@ -146,11 +148,20 @@ class MainWindow : public QMainWindow
     QString strippedName( const QString& fullFileName ) const;
     CrawlerWidget* currentCrawlerWidget() const;
     void displayQuickFindBar( QuickFindMux::QFDirection direction );
+    void updateMenuBarFromDocument( const CrawlerWidget* crawler );
+    void updateInfoLine();
 
     std::unique_ptr<Session> session_;
     std::shared_ptr<ExternalCommunicator> externalCommunicator_;
     std::shared_ptr<RecentFiles> recentFiles_;
     QString loadingFileName;
+
+    // Encoding
+    struct EncodingList {
+        const char* name;
+    };
+
+    static const EncodingList encoding_list[];
 
     enum { MaxRecentFiles = 5 };
     QAction *recentFileActions[MaxRecentFiles];
@@ -161,6 +172,7 @@ class MainWindow : public QMainWindow
     QMenu *editMenu;
     QMenu *viewMenu;
     QMenu *toolsMenu;
+    QMenu *encodingMenu;
     QMenu *helpMenu;
 
     InfoLine *infoLine;
@@ -184,6 +196,8 @@ class MainWindow : public QMainWindow
     QAction *optionsAction;
     QAction *aboutAction;
     QAction *aboutQtAction;
+    QActionGroup *encodingGroup;
+    QAction *encodingAction[CrawlerWidget::ENCODING_MAX];
 
     QIcon mainIcon_;
 

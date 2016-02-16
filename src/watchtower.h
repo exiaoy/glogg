@@ -1,3 +1,22 @@
+/*
+ * Copyright (C) 2015 Nicolas Bonnefon and other contributors
+ *
+ * This file is part of glogg.
+ *
+ * glogg is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * glogg is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with glogg.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
 #ifndef WATCHTOWER_H
 #define WATCHTOWER_H
 
@@ -31,6 +50,10 @@ class WatchTower {
     // Destroy the object
     ~WatchTower();
 
+    // Set the polling interval (in ms)
+    // 0 disables polling and is the default
+    void setPollingInterval( int interval_ms );
+
     // Add a file to the notification list. notification will be called when
     // the file is modified, moved or deleted.
     // Lifetime of the notification is tied to the Registration object returned.
@@ -51,6 +74,9 @@ class WatchTower {
 
     // Protects the observed_file_list_
     std::mutex observers_mutex_;
+
+    // Polling interval (0 disables polling)
+    uint32_t polling_interval_ms_ = 0;
 
     // Thread
     std::atomic_bool running_;
@@ -98,6 +124,17 @@ WatchTower<Driver>::~WatchTower()
     running_ = false;
     driver_.interruptWait();
     thread_.join();
+}
+
+template <typename Driver>
+void WatchTower<Driver>::setPollingInterval( int interval_ms )
+{
+    if ( polling_interval_ms_ != interval_ms ) {
+        polling_interval_ms_ = interval_ms;
+        // Break out of the wait
+        if ( polling_interval_ms_ > 0 )
+            driver_.interruptWait();
+    }
 }
 
 template <typename Driver>
@@ -222,7 +259,7 @@ void WatchTower<Driver>::run()
         std::vector<ObservedFile<Driver>*> files_needing_readding;
 
         auto files = driver_.waitAndProcessEvents(
-                &observed_file_list_, &lock, &files_needing_readding );
+                &observed_file_list_, &lock, &files_needing_readding, polling_interval_ms_ );
         LOG(logDEBUG) << "WatchTower::run: waitAndProcessEvents returned "
             << files.size() << " files, " << files_needing_readding.size()
             << " needing re-adding";
@@ -249,6 +286,31 @@ void WatchTower<Driver>::run()
                 // The observer is called with the mutex held,
                 // Let's hope it doesn't do anything too funky.
                 (*fptr)();
+
+                file->markAsChanged();
+            }
+        }
+
+        if ( polling_interval_ms_ > 0 ) {
+            // Also call files that have not been called for a while
+            for ( auto file: observed_file_list_ ) {
+                uint32_t ms_since_last_check =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - file->timeForLastCheck() ).count();
+                if ( ( ms_since_last_check > polling_interval_ms_ ) && file->hasChanged() ) {
+                    LOG(logDEBUG) << "WatchTower::run: " << file->file_name_;
+                    for ( auto observer: file->callbacks ) {
+                        LOG(logDEBUG) << "WatchTower::run: notifying the client because of a timeout!";
+                        // Here we have to cast our generic pointer back to
+                        // the function pointer in order to perform the call
+                        const std::shared_ptr<std::function<void()>> fptr =
+                            std::static_pointer_cast<std::function<void()>>( observer );
+                        // The observer is called with the mutex held,
+                        // Let's hope it doesn't do anything too funky.
+                        (*fptr)();
+                    }
+                    file->markAsChanged();
+                }
             }
         }
     }

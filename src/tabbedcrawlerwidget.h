@@ -23,6 +23,8 @@
 #include <QTabWidget>
 #include <QTabBar>
 
+#include "loadingstatus.h"
+
 // This class represents glogg's main widget, a tabbed
 // group of CrawlerWidgets.
 // This is a very slightly customised QTabWidget, with
@@ -36,14 +38,22 @@ class TabbedCrawlerWidget : public QTabWidget
 
       // "Overridden" addTab/removeTab that automatically
       // show/hide the tab bar
+      // The tab is created with the 'old data' icon.
       int addTab( QWidget* page, const QString& label );
       void removeTab( int index );
+
+      // Set the data status (icon) for the tab number 'index'
+      void setTabDataStatus( int index, DataStatus status );
 
     protected:
       void keyPressEvent( QKeyEvent* event );
       void mouseReleaseEvent( QMouseEvent *event);
 
     private:
+      const QIcon olddata_icon_;
+      const QIcon newdata_icon_;
+      const QIcon newfiltered_icon_;
+
       QTabBar myTabBar_;
 };
 

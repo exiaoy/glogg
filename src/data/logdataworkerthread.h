@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2009, 2010, 2014 Nicolas Bonnefon and other contributors
+ * Copyright (C) 2009, 2010, 2014, 2015 Nicolas Bonnefon and other contributors
  *
  * This file is part of glogg.
  *
@@ -27,99 +27,65 @@
 #include <QVector>
 
 #include "loadingstatus.h"
+#include "linepositionarray.h"
+#include "encodingspeculator.h"
+#include "utils.h"
 
-// This class is a list of end of lines position,
-// in addition to a list of qint64 (positions within the files)
-// it can keep track of whether the final LF was added (for non-LF terminated
-// files) and remove it when more data are added.
-class LinePositionArray
-{
-  public:
-    // Default constructor
-    LinePositionArray() : array()
-    { fakeFinalLF_ = false; }
-    // Copy constructor
-    inline LinePositionArray( const LinePositionArray& orig )
-        : array(orig.array)
-    { fakeFinalLF_ = orig.fakeFinalLF_; }
-
-    // Add a new line position at the given position
-    inline void append( qint64 pos )
-    { array.append( pos ); }
-    // Size of the array
-    inline int size()
-    { return array.size(); }
-    // Extract an element
-    inline qint64 at( int i ) const
-    { return array.at( i ); }
-    inline qint64 operator[]( int i ) const
-    { return array.at( i ); }
-    // Set the presence of a fake final LF
-    // Must be used after 'append'-ing a fake LF at the end.
-    void setFakeFinalLF( bool finalLF=true )
-    { fakeFinalLF_ = finalLF; }
-
-    // Add another list to this one, removing any fake LF on this list.
-    LinePositionArray& operator+= ( const LinePositionArray& other )
-    {
-        // If our final LF is fake, we remove it
-        if ( fakeFinalLF_ )
-            this->array.pop_back();
-
-        // Append the arrays
-        this->array += other.array;
-
-        // In case the 'other' object has a fake LF
-        this->fakeFinalLF_ = other.fakeFinalLF_;
-
-        return *this;
-    }
-
-  private:
-    QVector<qint64> array;
-    bool fakeFinalLF_;
-};
-
-// This class is a mutex protected set of indexing data.
-// It is thread safe.
+// This class is a thread-safe set of indexing data.
 class IndexingData
 {
   public:
-    IndexingData() : dataMutex_(), linePosition_(), maxLength_(0), indexedSize_(0) { }
+    IndexingData() : dataMutex_(), linePosition_(), maxLength_(0),
+        indexedSize_(0), encoding_(EncodingSpeculator::Encoding::ASCII7) { }
 
-    // Atomically get all the indexing data
-    void getAll( qint64* size, int* length,
-            LinePositionArray* linePosition );
+    // Get the total indexed size
+    qint64 getSize() const;
 
-    // Atomically set all the indexing data
-    // (overwriting the existing)
-    void setAll( qint64 size, int length,
-            const LinePositionArray& linePosition );
+    // Get the length of the longest line
+    int getMaxLength() const;
 
-    // Atomically add to all the existing 
+    // Get the total number of lines
+    LineNumber getNbLines() const;
+
+    // Get the position (in byte from the beginning of the file)
+    // of the end of the passed line.
+    qint64 getPosForLine( LineNumber line ) const;
+
+    // Get the guessed encoding for the content.
+    EncodingSpeculator::Encoding getEncodingGuess() const;
+
+    // Atomically add to all the existing
     // indexing data.
     void addAll( qint64 size, int length,
-            const LinePositionArray& linePosition );
+            const FastLinePositionArray& linePosition,
+            EncodingSpeculator::Encoding encoding );
+
+    // Completely clear the indexing data.
+    void clear();
 
   private:
-    QMutex dataMutex_;
+    mutable QMutex dataMutex_;
 
     LinePositionArray linePosition_;
     int maxLength_;
     qint64 indexedSize_;
+
+    EncodingSpeculator::Encoding encoding_;
 };
 
 class IndexOperation : public QObject
 {
   Q_OBJECT
   public:
-    IndexOperation( QString& fileName, bool* interruptRequest );
+    IndexOperation( const QString& fileName,
+            IndexingData* indexingData, bool* interruptRequest,
+            EncodingSpeculator* encodingSpeculator );
 
     virtual ~IndexOperation() { }
 
     // Start the indexing operation, returns true if it has been done
     // and false if it has been cancelled (results not copied)
-    virtual bool start( IndexingData& result ) = 0;
+    virtual bool start() = 0;
 
   signals:
     void indexingProgressed( int );
@@ -128,26 +94,33 @@ class IndexOperation : public QObject
     static const int sizeChunk;
 
     // Returns the total size indexed
-    qint64 doIndex( LinePositionArray& linePosition, int* maxLength,
+    // Modify the passed linePosition and maxLength
+    void doIndex( IndexingData* linePosition, EncodingSpeculator* encodingSpeculator,
             qint64 initialPosition );
 
     QString fileName_;
     bool* interruptRequest_;
+    IndexingData* indexing_data_;
+
+    EncodingSpeculator* encoding_speculator_;
 };
 
 class FullIndexOperation : public IndexOperation
 {
   public:
-    FullIndexOperation( QString& fileName, bool* interruptRequest )
-        : IndexOperation( fileName, interruptRequest ) { }
-    virtual bool start( IndexingData& result );
+    FullIndexOperation( const QString& fileName,
+            IndexingData* indexingData, bool* interruptRequest,
+            EncodingSpeculator* speculator )
+        : IndexOperation( fileName, indexingData, interruptRequest, speculator ) { }
+    virtual bool start();
 };
 
 class PartialIndexOperation : public IndexOperation
 {
   public:
-    PartialIndexOperation( QString& fileName, bool* interruptRequest, qint64 position );
-    virtual bool start( IndexingData& result );
+    PartialIndexOperation( const QString& fileName, IndexingData* indexingData,
+            bool* interruptRequest, EncodingSpeculator* speculator, qint64 position );
+    virtual bool start();
 
   private:
     qint64 initialPosition_;
@@ -163,7 +136,9 @@ class LogDataWorkerThread : public QThread
   Q_OBJECT
 
   public:
-    LogDataWorkerThread();
+    // Pass a pointer to the IndexingData (initially empty)
+    // This object will change it when indexing (IndexingData must be thread safe!)
+    LogDataWorkerThread( IndexingData* indexing_data );
     ~LogDataWorkerThread();
 
     // Attaches to a file on disk. Attaching to a non existant file
@@ -207,8 +182,11 @@ class LogDataWorkerThread : public QThread
     bool interruptRequested_;
     IndexOperation* operationRequested_;
 
-    // Shared indexing data
-    IndexingData indexingData_;
+    // Pointer to the owner's indexing data (we modify it)
+    IndexingData* indexing_data_;
+
+    // To guess the encoding
+    EncodingSpeculator encodingSpeculator_;
 };
 
 #endif

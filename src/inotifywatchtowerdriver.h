@@ -1,3 +1,22 @@
+/*
+ * Copyright (C) 2015 Nicolas Bonnefon and other contributors
+ *
+ * This file is part of glogg.
+ *
+ * glogg is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * glogg is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with glogg.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
 #ifndef INOTIFYWATCHTOWERDRIVER_H
 #define INOTIFYWATCHTOWERDRIVER_H
 
@@ -48,6 +67,18 @@ class INotifyWatchTowerDriver {
         int wd_;
     };
 
+    // Dummy class for inotify
+    class FileChangeToken {
+      public:
+        FileChangeToken() {}
+        FileChangeToken( const std::string& ) {}
+
+        void readFromFile( const std::string& ) {}
+
+        bool operator!=( const FileChangeToken& )
+        { return true; }
+    };
+
 #ifdef HAS_TEMPLATE_ALIASES
     using INotifyObservedFile = ObservedFile<INotifyWatchTowerDriver>;
     using INotifyObservedFileList = ObservedFileList<INotifyWatchTowerDriver>;
@@ -83,7 +114,8 @@ class INotifyWatchTowerDriver {
     std::vector<INotifyObservedFile*> waitAndProcessEvents(
             INotifyObservedFileList* list,
             std::unique_lock<std::mutex>* list_mutex,
-            std::vector<INotifyObservedFile*>* files_needing_readding );
+            std::vector<INotifyObservedFile*>* files_needing_readding,
+            int timeout_ms );
 
     // Interrupt waitAndProcessEvents if it is blocking.
     void interruptWait();

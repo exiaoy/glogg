@@ -24,6 +24,9 @@
 
 #include "config.h"
 
+// Line number are unsigned 32 bits for now.
+typedef uint32_t LineNumber;
+
 // Use a bisection method to find the given line number
 // in a sorted list.
 // The T type must be a container containing elements that
@@ -109,6 +112,22 @@ std::unique_ptr<T> make_unique(Args&&... args) {
 
 #ifndef HAVE_OVERRIDE
 #define override
+#endif
+
+#ifndef HAVE_HTONS
+inline uint16_t glogg_htons( uint16_t hostshort )
+{
+    static const uint16_t test_value = 0xABCD;
+    if ( *( reinterpret_cast<const uint8_t*>( &test_value ) ) == 0xCD ) {
+        uint16_t result = ( hostshort & 0x00FF ) << 8;
+        result |= ( hostshort & 0xFF00 ) >> 8;
+
+        return result;
+    }
+    else {
+        return hostshort;
+    }
+}
 #endif
 
 #endif

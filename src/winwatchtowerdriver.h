@@ -1,3 +1,22 @@
+/*
+ * Copyright (C) 2015 Nicolas Bonnefon and other contributors
+ *
+ * This file is part of glogg.
+ *
+ * glogg is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * glogg is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with glogg.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
 #ifndef WINWATCHTOWERDRIVER_H
 #define WINWATCHTOWERDRIVER_H
 
@@ -121,6 +140,26 @@ class WinWatchTowerDriver {
         std::shared_ptr<WinWatchedDirRecord> dir_record_;
     };
 
+    // On Windows, the token is the "last write" time
+    class FileChangeToken {
+      public:
+        FileChangeToken() {}
+        FileChangeToken( const std::string& file_name )
+        { readFromFile( file_name ); }
+
+        void readFromFile( const std::string& file_name );
+
+        bool operator==( const FileChangeToken& other )
+        { return ( low_date_time_ == other.low_date_time_ ) &&
+            ( high_date_time_ == other.high_date_time_ ); }
+        bool operator!=( const FileChangeToken& other )
+        { return ! operator==( other ); }
+
+      private:
+        DWORD low_date_time_ = 0;
+        DWORD high_date_time_ = 0;
+    };
+
     // Default constructor
     WinWatchTowerDriver();
     ~WinWatchTowerDriver();
@@ -136,8 +175,10 @@ class WinWatchTowerDriver {
     std::vector<ObservedFile<WinWatchTowerDriver>*> waitAndProcessEvents(
             ObservedFileList<WinWatchTowerDriver>* list,
             std::unique_lock<std::mutex>* lock,
-            std::vector<ObservedFile<WinWatchTowerDriver>*>* files_needing_readding );
+            std::vector<ObservedFile<WinWatchTowerDriver>*>* files_needing_readding,
+            int timout_ms );
 
+    // Interrupt waitAndProcessEvents
     void interruptWait();
 
   private:

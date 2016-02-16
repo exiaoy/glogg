@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014 Nicolas Bonnefon and other contributors
+ * Copyright (C) 2014, 2015 Nicolas Bonnefon and other contributors
  *
  * This file is part of glogg.
  *
@@ -20,15 +20,27 @@
 #include "tabbedcrawlerwidget.h"
 
 #include <QKeyEvent>
+#include <QLabel>
+
+#include "crawlerwidget.h"
 
 #include "log.h"
 
-TabbedCrawlerWidget::TabbedCrawlerWidget() : QTabWidget(), myTabBar_()
+TabbedCrawlerWidget::TabbedCrawlerWidget() : QTabWidget(),
+    olddata_icon_( ":/images/olddata_icon.png" ),
+    newdata_icon_( ":/images/newdata_icon.png" ),
+    newfiltered_icon_( ":/images/newfiltered_icon.png" ),
+    myTabBar_()
 {
 #ifdef WIN32
     myTabBar_.setStyleSheet( "QTabBar::tab {\
             height: 20px; "
-            "}" );
+            "} "
+            "QTabBar::close-button {\
+              height: 6px; width: 6px;\
+              subcontrol-origin: padding;\
+              subcontrol-position: left;\
+             }" );
 #else
     // On GTK style, it looks better with a smaller font
     myTabBar_.setStyleSheet(
@@ -37,10 +49,14 @@ TabbedCrawlerWidget::TabbedCrawlerWidget() : QTabWidget(), myTabBar_()
             " font-size: 9pt; "
             "} "
             "QTabBar::close-button {\
-            height: 6px; width: 6px; }" );
+              height: 6px; width: 6px;\
+              subcontrol-origin: padding;\
+              subcontrol-position: left;\
+             }" );
 #endif
     setTabBar( &myTabBar_ );
     myTabBar_.hide();
+
 }
 
 // I know hiding non-virtual functions from the base class is bad form
@@ -52,7 +68,23 @@ int TabbedCrawlerWidget::addTab( QWidget* page, const QString& label )
 {
     int index = QTabWidget::addTab( page, label );
 
+    if ( auto crawler = dynamic_cast<CrawlerWidget*>( page ) ) {
+        // Mmmmhhhh... new Qt5 signal syntax create tight coupling between
+        // us and the sender, baaaaad....
+
+        // Listen for a changing data status:
+        connect( crawler, &CrawlerWidget::dataStatusChanged,
+                [ this, index ]( DataStatus status ) { setTabDataStatus( index, status ); } );
+    }
+
+    // Display the icon
+    QLabel* icon_label = new QLabel();
+    icon_label->setPixmap( olddata_icon_.pixmap( 11, 12 ) );
+    icon_label->setAlignment( Qt::AlignCenter );
+    myTabBar_.setTabButton( index, QTabBar::RightSide, icon_label );
+
     LOG(logDEBUG) << "addTab, count = " << count();
+    LOG(logDEBUG) << "width = " << olddata_icon_.pixmap( 11, 12 ).devicePixelRatio();
 
     if ( count() > 1 )
         myTabBar_.show();
@@ -115,5 +147,29 @@ void TabbedCrawlerWidget::keyPressEvent( QKeyEvent* event )
     }
     else {
         QTabWidget::keyPressEvent( event );
+    }
+}
+
+void TabbedCrawlerWidget::setTabDataStatus( int index, DataStatus status )
+{
+    LOG(logDEBUG) << "TabbedCrawlerWidget::setTabDataStatus " << index;
+
+    QLabel* icon_label = dynamic_cast<QLabel*>(
+            myTabBar_.tabButton( index, QTabBar::RightSide ) );
+
+    if ( icon_label ) {
+        const QIcon* icon;
+        switch ( status ) {
+            case DataStatus::OLD_DATA:
+                icon = &olddata_icon_;
+                break;
+            case DataStatus::NEW_DATA:
+                icon = &newdata_icon_;
+                break;
+            case DataStatus::NEW_FILTERED_DATA:
+                icon = &newfiltered_icon_;
+                break;
+        }
+        icon_label->setPixmap ( icon->pixmap(12,12) );
     }
 }

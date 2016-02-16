@@ -1,3 +1,22 @@
+/*
+ * Copyright (C) 2015 Nicolas Bonnefon and other contributors
+ *
+ * This file is part of glogg.
+ *
+ * glogg is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * glogg is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with glogg.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
 #include "winwatchtowerdriver.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -60,6 +79,60 @@ const char* WinNotificationInfoList::advanceToNext()
     return pointer_;
 }
 
+// WinWatchTowerDriver::FileChangeToken
+
+void WinWatchTowerDriver::FileChangeToken::readFromFile(
+        const std::string& file_name )
+{
+    // On Windows, we open the file and get its last written date/time
+    // That seems to work alright in my tests, but who knows for sure?
+
+    HANDLE hFile = CreateFile(
+#ifdef UNICODE
+            longstringize( file_name ).c_str(),
+#else
+            ( file_name ).c_str(),
+#endif
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            NULL,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            NULL );
+
+    if ( hFile == (HANDLE)-1 ) {
+        DWORD err = GetLastError();
+        LOG(logERROR) << "FileChangeToken::readFromFile: failed with " << err;
+
+        low_date_time_ = 0;
+        high_date_time_ = 0;
+
+        return;
+    }
+    else {
+        BY_HANDLE_FILE_INFORMATION file_info;
+
+        if ( GetFileInformationByHandle(
+                    hFile,
+                    &file_info ) ) {
+            low_date_time_ = file_info.ftLastWriteTime.dwLowDateTime;
+            high_date_time_ = file_info.ftLastWriteTime.dwHighDateTime;
+
+            LOG(logDEBUG) << "FileChangeToken::readFromFile: low_date_time_ " << low_date_time_;
+            LOG(logDEBUG) << "FileChangeToken::readFromFile: high_date_time_ " << high_date_time_;
+        }
+        else {
+            DWORD err = GetLastError();
+            LOG(logERROR) << "FileChangeToken::readFromFile: failed with " << err;
+
+            low_date_time_ = 0;
+            high_date_time_ = 0;
+        }
+    }
+
+    CloseHandle(hFile);
+}
+
 // WinWatchTowerDriver
 
 WinWatchTowerDriver::WinWatchTowerDriver()
@@ -107,7 +180,7 @@ WinWatchTowerDriver::DirId WinWatchTowerDriver::addDir(
     }
 
     // Poke the thread
-    PostQueuedCompletionStatus( hCompPort_, 0, 0, NULL );
+    interruptWait();
 
     // Wait for the add task to be completed
     {
@@ -224,7 +297,8 @@ void WinWatchTowerDriver::serialisedAddDir(
 std::vector<ObservedFile<WinWatchTowerDriver>*> WinWatchTowerDriver::waitAndProcessEvents(
         ObservedFileList<WinWatchTowerDriver>* list,
         std::unique_lock<std::mutex>* lock,
-        std::vector<ObservedFile<WinWatchTowerDriver>*>* /* not needed in WinWatchTowerDriver */ )
+        std::vector<ObservedFile<WinWatchTowerDriver>*>* /* not needed in WinWatchTowerDriver */,
+        int timeout_ms )
 {
     std::vector<ObservedFile<WinWatchTowerDriver>*> files_to_notify { };
 
@@ -232,13 +306,16 @@ std::vector<ObservedFile<WinWatchTowerDriver>*> WinWatchTowerDriver::waitAndProc
     DWORD num_bytes = 0;
     LPOVERLAPPED lpOverlapped = 0;
 
+    if ( timeout_ms == 0 )
+        timeout_ms = INFINITE;
+
     lock->unlock();
     LOG(logDEBUG) << "waitAndProcessEvents now blocking...";
     BOOL status = GetQueuedCompletionStatus( hCompPort_,
             &num_bytes,
             &key,
             &lpOverlapped,
-            INFINITE );
+            timeout_ms );
     lock->lock();
 
     LOG(logDEBUG) << "Event (" << status << ") key: " << std::hex << key;

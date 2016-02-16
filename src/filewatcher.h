@@ -22,10 +22,8 @@
 
 #include <QObject>
 
-// This class encapsulate Qt's QFileSystemWatcher and additionally support
-// watching a file that doesn't exist yet (the class will watch the owning
-// directory)
-// Only supports one file at the moment.
+// This abstract class defines a way to watch a group of (potentially
+// absent) files for update.
 class FileWatcher : public QObject {
   Q_OBJECT
 
@@ -41,6 +39,9 @@ class FileWatcher : public QObject {
     // Removes the file to the list of file to watch
     // (do nothing if said file is not monitored)
     virtual void removeFile( const QString& fileName ) = 0;
+
+    // Set the polling interval (0 means disabled)
+    virtual void setPollingInterval( uint32_t ) {}
 
   signals:
     // Sent when the file on disk has changed in any way.

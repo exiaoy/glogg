@@ -8,7 +8,7 @@
 TARGET = glogg
 TEMPLATE = app
 
-greaterThan(QT_MAJOR_VERSION, 4): QT += widgets core
+greaterThan(QT_MAJOR_VERSION, 4): QT += core widgets
 
 win32:Debug:CONFIG += console
 
@@ -29,6 +29,7 @@ SOURCES += \
     src/data/logfiltereddata.cpp \
     src/data/logfiltereddataworkerthread.cpp \
     src/data/logdataworkerthread.cpp \
+    src/data/compressedlinestorage.cpp \
     src/mainwindow.cpp \
     src/crawlerwidget.cpp \
     src/abstractlogview.cpp \
@@ -54,6 +55,8 @@ SOURCES += \
     src/quickfindmux.cpp \
     src/signalmux.cpp \
     src/tabbedcrawlerwidget.cpp \
+    src/viewtools.cpp \
+    src/encodingspeculator.cpp \
 
 INCLUDEPATH += src/
 
@@ -96,10 +99,13 @@ HEADERS += \
     src/tabbedcrawlerwidget.h \
     src/loadingstatus.h \
     src/externalcom.h \
+    src/viewtools.h \
+    src/encodingspeculator.h \
 
 isEmpty(BOOST_PATH) {
     message(Building using system dynamic Boost libraries)
     macx {
+      # Path for brew installed libs
       INCLUDEPATH += /usr/local/include
       LIBS += -L/usr/local/lib -lboost_program_options-mt
     }
@@ -176,7 +182,7 @@ UI_DIR = $${OUT_PWD}/.ui/$${DESTDIR}-shared
 QMAKE_CXXFLAGS = -g
 
 # Which compiler are we using
-system( $${QMAKE_CXX} --version | grep -e " 4\\.[7-9]" ) {
+system( $${QMAKE_CXX} --version | grep -e " 4\\.[7-9]" ) || macx {
     message ( "g++ version 4.7 or newer, supports C++11" )
     CONFIG += C++11
 }
@@ -205,6 +211,11 @@ isEmpty(LOG_LEVEL) {
 else {
     message("Using specified log level: $$LOG_LEVEL")
     DEFINES += FILELOG_MAX_LEVEL=\"$$LOG_LEVEL\"
+}
+
+macx {
+    QMAKE_CXXFLAGS += -stdlib=libc++
+    QMAKE_LFLAGS += -stdlib=libc++
 }
 
 # Official builds can be generated with `qmake VERSION="1.2.3"'
@@ -253,23 +264,31 @@ else {
 }
 
 # File watching
-linux-g++ {
+linux-g++ || linux-g++-64 {
     CONFIG += inotify
 }
 
-inotify {
-    message("File watching using inotify")
-    QMAKE_CXXFLAGS += -DGLOGG_SUPPORTS_INOTIFY
-    SOURCES += src/platformfilewatcher.cpp src/inotifywatchtowerdriver.cpp src/watchtower.cpp src/watchtowerlist.cpp
-    HEADERS += src/platformfilewatcher.h src/inotifywatchtowerdriver.h src/watchtower.h src/watchtowerlist.h
+win32 {
+    message("File watching using Windows")
+    SOURCES += src/platformfilewatcher.cpp src/winwatchtowerdriver.cpp src/watchtower.cpp src/watchtowerlist.cpp
+    HEADERS += src/platformfilewatcher.h src/winwatchtowerdriver.h src/watchtower.h src/watchtowerlist.h
+    QMAKE_CXXFLAGS += -DGLOGG_SUPPORTS_POLLING
 }
 else {
-    win32 {
-        SOURCES += src/platformfilewatcher.cpp src/winwatchtowerdriver.cpp src/watchtower.cpp src/watchtowerlist.cpp
-        HEADERS += src/platformfilewatcher.h src/winwatchtowerdriver.h src/watchtower.h src/watchtowerlist.h
+    inotify {
+        message("File watching using inotify")
+        QMAKE_CXXFLAGS += -DGLOGG_SUPPORTS_INOTIFY
+        SOURCES += src/platformfilewatcher.cpp src/inotifywatchtowerdriver.cpp src/watchtower.cpp src/watchtowerlist.cpp
+        HEADERS += src/platformfilewatcher.h src/inotifywatchtowerdriver.h src/watchtower.h src/watchtowerlist.h
     }
     else {
+        message("File watching using Qt")
         SOURCES += src/qtfilewatcher.cpp
         HEADERS += src/qtfilewatcher.h
     }
+}
+
+# Performance measurement
+perf {
+    QMAKE_CXXFLAGS += -DGLOGG_PERF_MEASURE_FPS
 }

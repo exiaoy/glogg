@@ -107,8 +107,8 @@ MainWindow::MainWindow( std::unique_ptr<Session> session,
             SLOT( exitingQuickFind() ) );
 
     // Actions from the CrawlerWidget
-    signalMux_.connect( SIGNAL( followDisabled() ),
-            this, SLOT( disableFollow() ) );
+    signalMux_.connect( SIGNAL( followModeChanged( bool ) ),
+            this, SLOT( changeFollowMode( bool ) ) );
     signalMux_.connect( SIGNAL( updateLineNumber( int ) ),
             this, SLOT( lineNumberHandler( int ) ) );
 
@@ -229,6 +229,12 @@ void MainWindow::startBackgroundTasks()
 // Private functions
 //
 
+const MainWindow::EncodingList MainWindow::encoding_list[] = {
+    { "&Auto" },
+    { "ASCII / &ISO-8859-1" },
+    { "&UTF-8" },
+};
+
 // Menu actions
 void MainWindow::createActions()
 {
@@ -237,7 +243,7 @@ void MainWindow::createActions()
 
     openAction = new QAction(tr("&Open..."), this);
     openAction->setShortcut(QKeySequence::Open);
-    openAction->setIcon( QIcon(":/images/open16.png") );
+    openAction->setIcon( QIcon( ":/images/open14.png" ) );
     openAction->setStatusTip(tr("Open a file"));
     connect(openAction, SIGNAL(triggered()), this, SLOT(open()));
 
@@ -308,11 +314,11 @@ void MainWindow::createActions()
 
     reloadAction = new QAction( tr("&Reload"), this );
     reloadAction->setShortcut(QKeySequence::Refresh);
-    reloadAction->setIcon( QIcon(":/images/reload16.png") );
+    reloadAction->setIcon( QIcon(":/images/reload14.png") );
     signalMux_.connect( reloadAction, SIGNAL(triggered()), SLOT(reload()) );
 
     stopAction = new QAction( tr("&Stop"), this );
-    stopAction->setIcon( QIcon(":/images/stop16.png") );
+    stopAction->setIcon( QIcon(":/images/stop14.png") );
     stopAction->setEnabled( true );
     signalMux_.connect( stopAction, SIGNAL(triggered()), SLOT(stopLoading()) );
 
@@ -329,8 +335,22 @@ void MainWindow::createActions()
     connect( aboutAction, SIGNAL(triggered()), this, SLOT(about()) );
 
     aboutQtAction = new QAction(tr("About &Qt"), this);
-    aboutAction->setStatusTip(tr("Show the Qt library's About box"));
+    aboutQtAction->setStatusTip(tr("Show the Qt library's About box"));
     connect( aboutQtAction, SIGNAL(triggered()), this, SLOT(aboutQt()) );
+
+    encodingGroup = new QActionGroup( this );
+
+    for ( int i = 0; i < CrawlerWidget::ENCODING_MAX; ++i ) {
+        encodingAction[i] = new QAction( tr( encoding_list[i].name ), this );
+        encodingAction[i]->setCheckable( true );
+        encodingGroup->addAction( encodingAction[i] );
+    }
+
+    encodingAction[0]->setStatusTip(tr("Automatically detect the file's encoding"));
+    encodingAction[0]->setChecked( true );
+
+    connect( encodingGroup, SIGNAL( triggered( QAction* ) ),
+            this, SLOT( encodingChanged( QAction* ) ) );
 }
 
 void MainWindow::createMenus()
@@ -369,6 +389,13 @@ void MainWindow::createMenus()
     toolsMenu->addSeparator();
     toolsMenu->addAction( optionsAction );
 
+    encodingMenu = menuBar()->addMenu( tr("En&coding") );
+    encodingMenu->addAction( encodingAction[0] );
+    encodingMenu->addSeparator();
+    for ( int i = 1; i < CrawlerWidget::ENCODING_MAX; ++i ) {
+        encodingMenu->addAction( encodingAction[i] );
+    }
+
     menuBar()->addSeparator();
 
     helpMenu = menuBar()->addMenu( tr("&Help") );
@@ -388,7 +415,7 @@ void MainWindow::createToolBars()
             lineNbField->fontMetrics().size( 0, "Line 0000000") );
 
     toolBar = addToolBar( tr("&Toolbar") );
-    toolBar->setIconSize( QSize( 16, 16 ) );
+    toolBar->setIconSize( QSize( 14, 14 ) );
     toolBar->setMovable( false );
     toolBar->addAction( openAction );
     toolBar->addAction( reloadAction );
@@ -506,13 +533,25 @@ void MainWindow::about()
                 "<p>Built " GLOGG_DATE " from " GLOGG_COMMIT
 #endif
                 "<p><a href=\"http://glogg.bonnefon.org/\">http://glogg.bonnefon.org/</a></p>"
-                "<p>Copyright &copy; 2009, 2010, 2011, 2012, 2013, 2014 Nicolas Bonnefon and other contributors"
+                "<p>Copyright &copy; 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016 Nicolas Bonnefon and other contributors"
                 "<p>You may modify and redistribute the program under the terms of the GPL (version 3 or later)." ) );
 }
 
 // Opens the 'About Qt' dialog box.
 void MainWindow::aboutQt()
 {
+}
+
+void MainWindow::encodingChanged( QAction* action )
+{
+    int i = 0;
+    for ( i = 0; i < CrawlerWidget::ENCODING_MAX; ++i )
+        if ( action == encodingAction[i] )
+            break;
+
+    LOG(logDEBUG) << "encodingChanged, encoding " << i;
+    currentCrawlerWidget()->setEncoding( static_cast<CrawlerWidget::Encoding>( i ) );
+    updateInfoLine();
 }
 
 void MainWindow::toggleOverviewVisibility( bool isVisible )
@@ -539,9 +578,9 @@ void MainWindow::toggleFilteredLineNumbersVisibility( bool isVisible )
     emit optionsChanged();
 }
 
-void MainWindow::disableFollow()
+void MainWindow::changeFollowMode( bool follow )
 {
-    followAction->setChecked( false );
+    followAction->setChecked( follow );
 }
 
 void MainWindow::lineNumberHandler( int line )
@@ -571,8 +610,6 @@ void MainWindow::updateLoadingProgress( int progress )
 
 void MainWindow::handleLoadingFinished( LoadingStatus status )
 {
-    QLocale defaultLocale;
-
     LOG(logDEBUG) << "handleLoadingFinished success=" <<
         ( status == LoadingStatus::Successful );
 
@@ -581,29 +618,7 @@ void MainWindow::handleLoadingFinished( LoadingStatus status )
 
     if ( status == LoadingStatus::Successful )
     {
-        // Following should always work as we will only receive enter
-        // this slot if there is a crawler connected.
-        QString current_file =
-            session_->getFilename( currentCrawlerWidget() ).c_str();
-
-        uint64_t fileSize;
-        uint32_t fileNbLine;
-        QDateTime lastModified;
-
-        session_->getFileInfo( currentCrawlerWidget(),
-                &fileSize, &fileNbLine, &lastModified );
-        if ( lastModified.isValid() ) {
-            const QString date =
-                defaultLocale.toString( lastModified, QLocale::NarrowFormat );
-            infoLine->setText( tr( "%1 (%2 - %3 lines - modified on %4)" )
-                    .arg(current_file).arg(readableSize(fileSize))
-                    .arg(fileNbLine).arg( date ) );
-        }
-        else {
-            infoLine->setText( tr( "%1 (%2 - %3 lines)" )
-                    .arg(current_file).arg(readableSize(fileSize))
-                    .arg(fileNbLine) );
-        }
+        updateInfoLine();
 
         infoLine->hideGauge();
         stopAction->setEnabled( false );
@@ -668,6 +683,9 @@ void MainWindow::currentTabChanged( int index )
 
         // New tab is set up with fonts etc...
         emit optionsChanged();
+
+        // Update the menu bar
+        updateMenuBarFromDocument( crawler_widget );
 
         // Update the title bar
         updateTitleBar( QString(
@@ -900,6 +918,46 @@ void MainWindow::updateRecentFileActions()
     }
 
     // separatorAction->setVisible(!recentFiles.isEmpty());
+}
+
+// Update our menu bar to match the settings of the crawler
+// (used when the tab is changed)
+void MainWindow::updateMenuBarFromDocument( const CrawlerWidget* crawler )
+{
+    auto encoding = crawler->encodingSetting();
+    encodingAction[static_cast<int>( encoding )]->setChecked( true );
+}
+
+// Update the top info line from the session
+void MainWindow::updateInfoLine()
+{
+    QLocale defaultLocale;
+
+    // Following should always work as we will only receive enter
+    // this slot if there is a crawler connected.
+    QString current_file =
+        session_->getFilename( currentCrawlerWidget() ).c_str();
+
+    uint64_t fileSize;
+    uint32_t fileNbLine;
+    QDateTime lastModified;
+
+    session_->getFileInfo( currentCrawlerWidget(),
+            &fileSize, &fileNbLine, &lastModified );
+    if ( lastModified.isValid() ) {
+        const QString date =
+            defaultLocale.toString( lastModified, QLocale::NarrowFormat );
+        infoLine->setText( tr( "%1 (%2 - %3 lines - modified on %4 - %5)" )
+                .arg(current_file).arg(readableSize(fileSize))
+                .arg(fileNbLine).arg( date )
+                .arg(currentCrawlerWidget()->encodingText()) );
+    }
+    else {
+        infoLine->setText( tr( "%1 (%2 - %3 lines - %4)" )
+                .arg(current_file).arg(readableSize(fileSize))
+                .arg(fileNbLine)
+                .arg(currentCrawlerWidget()->encodingText()) );
+    }
 }
 
 // Write settings to permanent storage

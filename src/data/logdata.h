@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2009, 2010, 2013, 2014 Nicolas Bonnefon and other contributors
+ * Copyright (C) 2009, 2010, 2013, 2014, 2015 Nicolas Bonnefon and other contributors
  *
  * This file is part of glogg.
  *
@@ -28,6 +28,7 @@
 #include <QVector>
 #include <QMutex>
 #include <QDateTime>
+#include <QTextCodec>
 
 #include "utils.h"
 
@@ -74,6 +75,12 @@ class LogData : public AbstractLogData {
     // Throw away all the file data and reload/reindex.
     void reload();
 
+    // Update the polling interval (in ms, 0 means disabled)
+    void setPollingInterval( uint32_t interval_ms );
+
+    // Get the auto-detected encoding for the indexed text.
+    EncodingSpeculator::Encoding getDetectedEncoding() const;
+
   signals:
     // Sent during the 'attach' process to signal progress
     // percent being the percentage of completion.
@@ -103,7 +110,6 @@ class LogData : public AbstractLogData {
         void start( LogDataWorkerThread& workerThread ) const
         { doStart( workerThread ); }
         const QString& getFilename() const { return filename_; }
-        virtual bool isFull() const { return true; }
 
       protected:
         virtual void doStart( LogDataWorkerThread& workerThread ) const = 0;
@@ -117,8 +123,6 @@ class LogData : public AbstractLogData {
             : LogDataOperation( fileName ) {}
         ~AttachOperation() {};
 
-        bool isFull() const { return true; }
-
       protected:
         void doStart( LogDataWorkerThread& workerThread ) const;
     };
@@ -128,8 +132,6 @@ class LogData : public AbstractLogData {
       public:
         FullIndexOperation() : LogDataOperation( QString() ) {}
         ~FullIndexOperation() {};
-
-        bool isFull() const { return false; }
 
       protected:
         void doStart( LogDataWorkerThread& workerThread ) const;
@@ -141,8 +143,6 @@ class LogData : public AbstractLogData {
         PartialIndexOperation( qint64 fileSize )
             : LogDataOperation( QString() ), filesize_( fileSize ) {}
         ~PartialIndexOperation() {};
-
-        bool isFull() const { return false; }
 
       protected:
         void doStart( LogDataWorkerThread& workerThread ) const;
@@ -162,24 +162,26 @@ class LogData : public AbstractLogData {
     qint64 doGetNbLine() const override;
     int doGetMaxLength() const override;
     int doGetLineLength( qint64 line ) const override;
+    void doSetDisplayEncoding( const char* encoding ) override;
 
     void enqueueOperation( std::shared_ptr<const LogDataOperation> newOperation );
     void startOperation();
 
     QString indexingFileName_;
     std::unique_ptr<QFile> attached_file_;
-    LinePositionArray linePosition_;
-    qint64 fileSize_;
-    qint64 nbLines_;
-    int maxLength_;
+
+    // Indexing data, read by us, written by the worker thread
+    IndexingData indexing_data_;
+
     QDateTime lastModifiedDate_;
     std::shared_ptr<const LogDataOperation> currentOperation_;
     std::shared_ptr<const LogDataOperation> nextOperation_;
 
+    // Codec to decode text
+    QTextCodec* codec_;
+
     // To protect the file:
     mutable QMutex fileMutex_;
-    // To protect linePosition_, fileSize_ and maxLength_:
-    mutable QMutex dataMutex_;
     // (are mutable to allow 'const' function to touch it,
     // while remaining const)
     // When acquiring both, data should be help before locking file.

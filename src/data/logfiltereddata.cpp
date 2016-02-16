@@ -257,7 +257,7 @@ void LogFilteredData::handleSearchProgressed( int nbMatches, int progress )
 
 LineNumber LogFilteredData::findLogDataLine( LineNumber lineNum ) const
 {
-    LineNumber line = 0;
+    LineNumber line = std::numeric_limits<LineNumber>::max();
     if ( visibility_ == MatchesOnly ) {
         if ( lineNum < matching_lines_.size() ) {
             line = matching_lines_[lineNum].lineNumber();
@@ -368,6 +368,11 @@ int LogFilteredData::doGetLineLength( qint64 lineNum ) const
 {
     qint64 line = findLogDataLine( lineNum );
     return sourceLogData_->getExpandedLineString( line ).length();
+}
+
+void LogFilteredData::doSetDisplayEncoding( const char* encoding )
+{
+    LOG(logDEBUG) << "AbstractLogData::setDisplayEncoding: " << encoding;
 }
 
 // TODO: We might be a bit smarter and not regenerate the whole thing when

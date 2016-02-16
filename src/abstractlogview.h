@@ -24,10 +24,15 @@
 #include <QAbstractScrollArea>
 #include <QBasicTimer>
 
+#ifdef GLOGG_PERF_MEASURE_FPS
+#  include "perfcounter.h"
+#endif
+
 #include "selection.h"
 #include "quickfind.h"
 #include "overviewwidget.h"
 #include "quickfindmux.h"
+#include "viewtools.h"
 
 class QMenu;
 class QAction;
@@ -169,17 +174,18 @@ class AbstractLogView :
     void selectAll();
 
   protected:
-    void mousePressEvent( QMouseEvent* mouseEvent );
-    void mouseMoveEvent( QMouseEvent* mouseEvent );
-    void mouseReleaseEvent( QMouseEvent* );
-    void mouseDoubleClickEvent( QMouseEvent* mouseEvent );
-    void timerEvent( QTimerEvent* timerEvent );
-    void changeEvent( QEvent* changeEvent );
-    void paintEvent( QPaintEvent* paintEvent );
-    void resizeEvent( QResizeEvent* resizeEvent );
-    void scrollContentsBy( int dx, int dy );
-    void keyPressEvent( QKeyEvent* keyEvent );
-    void wheelEvent( QWheelEvent* wheelEvent );
+    virtual void mousePressEvent( QMouseEvent* mouseEvent );
+    virtual void mouseMoveEvent( QMouseEvent* mouseEvent );
+    virtual void mouseReleaseEvent( QMouseEvent* );
+    virtual void mouseDoubleClickEvent( QMouseEvent* mouseEvent );
+    virtual void timerEvent( QTimerEvent* timerEvent );
+    virtual void changeEvent( QEvent* changeEvent );
+    virtual void paintEvent( QPaintEvent* paintEvent );
+    virtual void resizeEvent( QResizeEvent* resizeEvent );
+    virtual void scrollContentsBy( int dx, int dy );
+    virtual void keyPressEvent( QKeyEvent* keyEvent );
+    virtual void wheelEvent( QWheelEvent* wheelEvent );
+    virtual bool event( QEvent * e );
 
     // Must be implemented to return wether the line number is
     // a match, a mark or just a normal line (used for coloured bullets)
@@ -198,8 +204,8 @@ class AbstractLogView :
   signals:
     // Sent when a new line has been selected by the user.
     void newSelection(int line);
-    // Sent up to the MainWindow to disable the follow mode
-    void followDisabled();
+    // Sent up to the MainWindow to enable/disable the follow mode
+    void followModeChanged( bool enabled );
     // Sent when the view wants the QuickFind widget pattern to change.
     void changeQuickFind( const QString& newPattern,
             QuickFindMux::QFDirection newDirection );
@@ -221,6 +227,8 @@ class AbstractLogView :
     // Sent up for view initiated quickfind searches
     void searchNext();
     void searchPrevious();
+    // Sent up when the user has moved within the view
+    void activity();
 
   public slots:
     // Makes the widget select and display the passed line.
@@ -255,6 +263,10 @@ class AbstractLogView :
     // Configure the setting of whether to show line number margin
     void setLineNumbersVisible( bool lineNumbersVisible );
 
+    // Force the next refresh to fully redraw the view by invalidating the cache.
+    // To be used if the data might have changed.
+    void forceRefresh();
+
   private slots:
     void handlePatternUpdated();
     void addToSearch();
@@ -263,8 +275,10 @@ class AbstractLogView :
     void copy();
 
   private:
-    // Constants
-    static const int OVERVIEW_WIDTH;
+    // Graphic parameters
+    static constexpr int OVERVIEW_WIDTH = 27;
+    static constexpr int HOOK_THRESHOLD = 600;
+    static constexpr int PULL_TO_FOLLOW_HOOKED_HEIGHT = 10;
 
     // Width of the bullet zone, including decoration
     int bulletZoneWidthPx_;
@@ -272,14 +286,14 @@ class AbstractLogView :
     // Total size of all margins and decorations in pixels
     int leftMarginPx_;
 
-    // Number of digits to display in line numbers
-    int nbDigitsInLineNumber_;
-
     // Digits buffer (for numeric keyboard entry)
     DigitsBuffer digitsBuffer_;
 
     // Follow mode
     bool followMode_;
+
+    // ElasticHook for follow mode
+    ElasticHook followElasticHook_;
 
     // Whether to show line numbers or not
     bool lineNumbersVisible_;
@@ -311,8 +325,7 @@ class AbstractLogView :
     qint64 markingClickLine_;
 
     Selection selection_;
-    qint64 firstLine;
-    qint64 lastLine;
+    LineNumber firstLine;
     int firstCol;
 
     // Text handling
@@ -331,12 +344,35 @@ class AbstractLogView :
     // Our own QuickFind object
     QuickFind quickFind_;
 
-    int getNbVisibleLines() const;
+#ifdef GLOGG_PERF_MEASURE_FPS
+    // Performance measurement
+    PerfCounter perfCounter_;
+#endif
+
+    // Current "pull to follow" bar height
+    int pullToFollowHeight_;
+
+    // Cache pixmap and associated info
+    struct TextAreaCache {
+        QPixmap pixmap_;
+        bool invalid_;
+        int first_line_;
+        int last_line_;
+        int first_column_;
+    };
+    struct PullToFollowCache {
+        QPixmap pixmap_;
+        int nb_columns_;
+    };
+    TextAreaCache textAreaCache_ = { {}, true, 0, 0, 0 };
+    PullToFollowCache pullToFollowCache_ = { {}, 0 };
+
+    LineNumber getNbVisibleLines() const;
     int getNbVisibleCols() const;
     QPoint convertCoordToFilePos( const QPoint& pos ) const;
     int convertCoordToLine( int yPos ) const;
     int convertCoordToColumn( int xPos ) const;
-    void displayLine( int line );
+    void displayLine( LineNumber line );
     void moveSelection( int y );
     void jumpToStartOfLine();
     void jumpToEndOfLine();
@@ -350,7 +386,14 @@ class AbstractLogView :
     void considerMouseHovering( int x_pos, int y_pos );
 
     // Search functions (for n/N)
-    void searchUsingFunction ( qint64 (QuickFind::*search_function)() );
+    void searchUsingFunction( qint64 (QuickFind::*search_function)() );
+
+    void updateScrollBars();
+
+    void drawTextArea( QPaintDevice* paint_device, int32_t delta_y );
+    QPixmap drawPullToFollowBar( int width, float pixel_ratio );
+
+    void disableFollow();
 
     // Utils functions
     bool isCharWord( char c );

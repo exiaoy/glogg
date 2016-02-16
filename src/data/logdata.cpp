@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2009, 2010, 2013, 2014 Nicolas Bonnefon and other contributors
+ * Copyright (C) 2009, 2010, 2013, 2014, 2015 Nicolas Bonnefon and other contributors
  *
  * This file is part of glogg.
  *
@@ -62,16 +62,15 @@ void LogData::PartialIndexOperation::doStart(
 
 // Constructs an empty log file.
 // It must be displayed without error.
-LogData::LogData() : AbstractLogData(), linePosition_(),
-    fileMutex_(), dataMutex_(), workerThread_()
+LogData::LogData() : AbstractLogData(), indexing_data_(),
+    fileMutex_(), workerThread_( &indexing_data_ )
 {
     // Start with an "empty" log
     attached_file_ = nullptr;
-    fileSize_      = 0;
-    nbLines_       = 0;
-    maxLength_     = 0;
     currentOperation_ = nullptr;
     nextOperation_    = nullptr;
+
+    codec_ = QTextCodec::codecForName( "ISO-8859-1" );
 
 #if defined(GLOGG_SUPPORTS_INOTIFY) || defined(WIN32)
     fileWatcher_ = std::make_shared<PlatformFileWatcher>();
@@ -115,10 +114,9 @@ void LogData::attachFile( const QString& fileName )
         throw CantReattachErr();
     }
 
-    workerThread_.interrupt();
+    attached_file_.reset( new QFile( fileName ) );
+    attached_file_->open( QIODevice::ReadOnly );
 
-    // If an attach operation is already in progress, the new one will
-    // be delayed until the current one is finished (canceled)
     std::shared_ptr<const LogDataOperation> operation( new AttachOperation( fileName ) );
     enqueueOperation( std::move( operation ) );
 }
@@ -130,7 +128,7 @@ void LogData::interruptLoading()
 
 qint64 LogData::getFileSize() const
 {
-    return fileSize_;
+    return indexing_data_.getSize();
 }
 
 QDateTime LogData::getLastModifiedDate() const
@@ -151,6 +149,11 @@ void LogData::reload()
     workerThread_.interrupt();
 
     enqueueOperation( std::make_shared<FullIndexOperation>() );
+}
+
+void LogData::setPollingInterval( uint32_t interval_ms )
+{
+    fileWatcher_->setPollingInterval( interval_ms );
 }
 
 //
@@ -183,15 +186,7 @@ void LogData::startOperation()
     {
         LOG(logDEBUG) << "startOperation found something to do.";
 
-        // If it's a full indexing ...
-        // ... we invalidate the non indexed data
-        if ( currentOperation_->isFull() ) {
-            fileSize_     = 0;
-            nbLines_      = 0;
-            maxLength_    = 0;
-        }
-
-        // And let the operation do its stuff
+        // Let the operation do its stuff
         currentOperation_->start( workerThread_ );
     }
 }
@@ -204,16 +199,18 @@ void LogData::fileChangedOnDisk()
 {
     LOG(logDEBUG) << "signalFileChanged";
 
-    // fileWatcher_->removeFile( file_->fileName() );
-
     const QString name = attached_file_->fileName();
     QFileInfo info( name );
 
+    // Need to open the file in case it was absent
+    attached_file_->open( QIODevice::ReadOnly );
+
     std::shared_ptr<LogDataOperation> newOperation;
 
-    LOG(logDEBUG) << "current fileSize=" << fileSize_;
+    qint64 file_size = indexing_data_.getSize();
+    LOG(logDEBUG) << "current fileSize=" << file_size;
     LOG(logDEBUG) << "info file_->size()=" << info.size();
-    if ( info.size() < fileSize_ ) {
+    if ( info.size() < file_size ) {
         fileChangedOnDisk_ = Truncated;
         LOG(logINFO) << "File truncated";
         newOperation = std::make_shared<FullIndexOperation>();
@@ -221,7 +218,7 @@ void LogData::fileChangedOnDisk()
     else if ( fileChangedOnDisk_ != DataAdded ) {
         fileChangedOnDisk_ = DataAdded;
         LOG(logINFO) << "New data on disk";
-        newOperation = std::make_shared<PartialIndexOperation>( fileSize_ );
+        newOperation = std::make_shared<PartialIndexOperation>( file_size );
     }
 
     if ( newOperation )
@@ -235,38 +232,14 @@ void LogData::fileChangedOnDisk()
 
 void LogData::indexingFinished( LoadingStatus status )
 {
-    LOG(logDEBUG) << "Entering LogData::indexingFinished.";
-
-    // We use the newly created file data or restore the old ones.
-    // (Qt implicit copy makes this fast!)
-    {
-        QMutexLocker locker( &dataMutex_ );
-        workerThread_.getIndexingData( &fileSize_, &maxLength_, &linePosition_ );
-        nbLines_ = linePosition_.size();
-    }
-
     LOG(logDEBUG) << "indexingFinished: " <<
         ( status == LoadingStatus::Successful ) <<
-        ", found " << nbLines_ << " lines.";
+        ", found " << indexing_data_.getNbLines() << " lines.";
 
     if ( status == LoadingStatus::Successful ) {
-        // Use the new filename if needed
-        if ( !currentOperation_->getFilename().isNull() ) {
-            QString newFileName = currentOperation_->getFilename();
-
-            if ( attached_file_ ) {
-                QMutexLocker locker( &fileMutex_ );
-                attached_file_->setFileName( newFileName );
-            }
-            else {
-                QMutexLocker locker( &fileMutex_ );
-                attached_file_.reset( new QFile( newFileName ) );
-
-                // And we watch the file for updates
-                fileChangedOnDisk_ = Unchanged;
-                fileWatcher_->addFile( attached_file_->fileName() );
-            }
-        }
+        // Start watching we watch the file for updates
+        fileChangedOnDisk_ = Unchanged;
+        fileWatcher_->addFile( attached_file_->fileName() );
 
         // Update the modified date/time if the file exists
         lastModifiedDate_ = QDateTime();
@@ -300,38 +273,40 @@ void LogData::indexingFinished( LoadingStatus status )
 //
 qint64 LogData::doGetNbLine() const
 {
-    return nbLines_;
+    return indexing_data_.getNbLines();
 }
 
 int LogData::doGetMaxLength() const
 {
-    return maxLength_;
+    return indexing_data_.getMaxLength();
 }
 
 int LogData::doGetLineLength( qint64 line ) const
 {
-    if ( line >= nbLines_ ) { return 0; /* exception? */ }
+    if ( line >= indexing_data_.getNbLines() ) { return 0; /* exception? */ }
 
     int length = doGetExpandedLineString( line ).length();
 
     return length;
 }
 
+void LogData::doSetDisplayEncoding( const char* encoding )
+{
+    LOG(logDEBUG) << "AbstractLogData::setDisplayEncoding: " << encoding;
+    codec_ = QTextCodec::codecForName( encoding );
+}
+
 QString LogData::doGetLineString( qint64 line ) const
 {
-    if ( line >= nbLines_ ) { return QString(); /* exception? */ }
+    if ( line >= indexing_data_.getNbLines() ) { return 0; /* exception? */ }
 
-    dataMutex_.lock();
     fileMutex_.lock();
-    attached_file_->open( QIODevice::ReadOnly );
 
-    attached_file_->seek( (line == 0) ? 0 : linePosition_[line-1] );
+    attached_file_->seek( (line == 0) ? 0 : indexing_data_.getPosForLine( line-1 ) );
 
-    QString string = QString( attached_file_->readLine() );
+    QString string = codec_->toUnicode( attached_file_->readLine() );
 
-    attached_file_->close();
     fileMutex_.unlock();
-    dataMutex_.unlock();
 
     string.chop( 1 );
 
@@ -340,21 +315,17 @@ QString LogData::doGetLineString( qint64 line ) const
 
 QString LogData::doGetExpandedLineString( qint64 line ) const
 {
-    if ( line >= nbLines_ ) { return QString(); /* exception? */ }
+    if ( line >= indexing_data_.getNbLines() ) { return 0; /* exception? */ }
 
-    dataMutex_.lock();
     fileMutex_.lock();
-    attached_file_->open( QIODevice::ReadOnly );
 
-    attached_file_->seek( (line == 0) ? 0 : linePosition_[line-1] );
+    attached_file_->seek( (line == 0) ? 0 : indexing_data_.getPosForLine( line-1 ) );
 
     QByteArray rawString = attached_file_->readLine();
 
-    attached_file_->close();
     fileMutex_.unlock();
-    dataMutex_.unlock();
 
-    QString string = QString( untabify( rawString.constData() ) );
+    QString string = untabify( codec_->toUnicode( rawString ) );
     string.chop( 1 );
 
     return string;
@@ -374,37 +345,32 @@ QStringList LogData::doGetLines( qint64 first_line, int number ) const
         return QStringList();
     }
 
-    if ( last_line >= nbLines_ ) {
+    if ( last_line >= indexing_data_.getNbLines() ) {
         LOG(logWARNING) << "LogData::doGetLines Lines out of bound asked for";
         return QStringList(); /* exception? */
     }
 
-    dataMutex_.lock();
-
     fileMutex_.lock();
-    attached_file_->open( QIODevice::ReadOnly );
 
-    const qint64 first_byte = (first_line == 0) ? 0 : linePosition_[first_line-1];
-    const qint64 last_byte  = linePosition_[last_line];
+    const qint64 first_byte = (first_line == 0) ?
+        0 : indexing_data_.getPosForLine( first_line-1 );
+    const qint64 last_byte  = indexing_data_.getPosForLine( last_line );
     // LOG(logDEBUG) << "LogData::doGetLines first_byte:" << first_byte << " last_byte:" << last_byte;
     attached_file_->seek( first_byte );
     QByteArray blob = attached_file_->read( last_byte - first_byte );
 
-    attached_file_->close();
     fileMutex_.unlock();
 
     qint64 beginning = 0;
     qint64 end = 0;
     for ( qint64 line = first_line; (line <= last_line); line++ ) {
-        end = linePosition_[line] - first_byte;
+        end = indexing_data_.getPosForLine( line ) - first_byte;
         // LOG(logDEBUG) << "Getting line " << line << " beginning " << beginning << " end " << end;
         QByteArray this_line = blob.mid( beginning, end - beginning - 1 );
         // LOG(logDEBUG) << "Line is: " << QString( this_line ).toStdString();
-        list.append( QString( this_line ) );
+        list.append( codec_->toUnicode( this_line ) );
         beginning = end;
     }
-
-    dataMutex_.unlock();
 
     return list;
 }
@@ -418,37 +384,38 @@ QStringList LogData::doGetExpandedLines( qint64 first_line, int number ) const
         return QStringList();
     }
 
-    if ( last_line >= nbLines_ ) {
+    if ( last_line >= indexing_data_.getNbLines() ) {
         LOG(logWARNING) << "LogData::doGetExpandedLines Lines out of bound asked for";
         return QStringList(); /* exception? */
     }
 
-    dataMutex_.lock();
-
     fileMutex_.lock();
-    attached_file_->open( QIODevice::ReadOnly );
 
-    const qint64 first_byte = (first_line == 0) ? 0 : linePosition_[first_line-1];
-    const qint64 last_byte  = linePosition_[last_line];
+    const qint64 first_byte = (first_line == 0) ?
+        0 : indexing_data_.getPosForLine( first_line-1 );
+    const qint64 last_byte  = indexing_data_.getPosForLine( last_line );
     // LOG(logDEBUG) << "LogData::doGetExpandedLines first_byte:" << first_byte << " last_byte:" << last_byte;
+
     attached_file_->seek( first_byte );
     QByteArray blob = attached_file_->read( last_byte - first_byte );
 
-    attached_file_->close();
     fileMutex_.unlock();
 
     qint64 beginning = 0;
     qint64 end = 0;
     for ( qint64 line = first_line; (line <= last_line); line++ ) {
-        end = linePosition_[line] - first_byte;
+        end = indexing_data_.getPosForLine( line ) - first_byte;
         // LOG(logDEBUG) << "Getting line " << line << " beginning " << beginning << " end " << end;
         QByteArray this_line = blob.mid( beginning, end - beginning - 1 );
         // LOG(logDEBUG) << "Line is: " << QString( this_line ).toStdString();
-        list.append( untabify( this_line.constData() ) );
+        list.append( untabify( codec_->toUnicode( this_line ) ) );
         beginning = end;
     }
 
-    dataMutex_.unlock();
-
     return list;
+}
+
+EncodingSpeculator::Encoding LogData::getDetectedEncoding() const
+{
+    return indexing_data_.getEncodingGuess();
 }

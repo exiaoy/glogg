@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2009, 2010, 2011, 2013, 2014 Nicolas Bonnefon
+ * Copyright (C) 2009, 2010, 2011, 2013, 2014, 2015 Nicolas Bonnefon
  * and other contributors
  *
  * This file is part of glogg.
@@ -69,12 +69,27 @@ class CrawlerWidget : public QSplitter,
     // is interacting with
     void selectAll();
 
+    enum Encoding {
+        ENCODING_AUTO = 0,
+        ENCODING_ISO_8859_1,
+        ENCODING_UTF8,
+        ENCODING_MAX,
+    };
+
+    Encoding encodingSetting() const;
+
+    // Get the text description of the encoding effectively used,
+    // suitable to display to the user.
+    QString encodingText() const;
+
   public slots:
     // Stop the asynchoronous loading of the file if one is in progress
     // The file is identified by the view attached to it.
     void stopLoading();
     // Reload the displayed file
     void reload();
+    // Set the encoding
+    void setEncoding( Encoding encoding );
 
   protected:
     // Implementation of the ViewInterface functions
@@ -106,8 +121,8 @@ class CrawlerWidget : public QSplitter,
     void loadingFinished( LoadingStatus status );
     // Sent when follow mode is enabled/disabled
     void followSet( bool checked );
-    // Sent up to the MainWindow to disable the follow mode
-    void followDisabled();
+    // Sent up to the MainWindow to enable/disable the follow mode
+    void followModeChanged( bool follow );
     // Sent up when the current line number is updated
     void updateLineNumber( int line );
 
@@ -115,6 +130,10 @@ class CrawlerWidget : public QSplitter,
     void searchRefreshChanged( int state );
     // "ignore case" check has been changed
     void ignoreCaseChanged( int state );
+
+    // Sent when the data status (whether new not seen data are
+    // available) has changed
+    void dataStatusChanged( DataStatus status );
 
   private slots:
     // Instructs the widget to start a search using the current search line.
@@ -160,6 +179,9 @@ class CrawlerWidget : public QSplitter,
 
     // Called when a match is hovered on in the filtered view
     void mouseHoveredOverMatch( qint64 line );
+
+    // Called when there was activity in the views
+    void activityDetected();
 
   private:
     // State machine holding the state of the search, used to allow/disallow
@@ -208,6 +230,8 @@ class CrawlerWidget : public QSplitter,
     void updateSearchCombo();
     AbstractLogView* activeView() const;
     void printSearchInfoMessage( int nbMatches = 0 );
+    void changeDataStatus( DataStatus status );
+    void updateEncoding();
 
     // Palette for error notification (yellow background)
     static const QPalette errorPalette;
@@ -259,6 +283,19 @@ class CrawlerWidget : public QSplitter,
     // Are we loading something?
     // Set to false when we receive a completion message from the LogData
     bool            loadingInProgress_;
+
+    // Is it not the first time we are loading something?
+    bool            firstLoadDone_;
+
+    // Current number of matches
+    int             nbMatches_;
+
+    // the current dataStatus (whether we have new, not seen, data)
+    DataStatus      dataStatus_;
+
+    // Current encoding setting;
+    Encoding        encodingSetting_ = ENCODING_AUTO;
+    QString         encoding_text_;
 };
 
 #endif

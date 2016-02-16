@@ -1,3 +1,22 @@
+/*
+ * Copyright (C) 2015 Nicolas Bonnefon and other contributors
+ *
+ * This file is part of glogg.
+ *
+ * glogg is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * glogg is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with glogg.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
 #include "inotifywatchtowerdriver.h"
 
 #include <sys/inotify.h>
@@ -90,7 +109,8 @@ std::vector<INotifyWatchTowerDriver::INotifyObservedFile*>
 INotifyWatchTowerDriver::waitAndProcessEvents(
         INotifyObservedFileList* list,
         std::unique_lock<std::mutex>* list_lock,
-        std::vector<INotifyObservedFile*>* files_needing_readding )
+        std::vector<INotifyObservedFile*>* files_needing_readding,
+        int timeout_ms )
 {
     std::vector<INotifyObservedFile*> files_to_notify;
     struct pollfd fds[2];
@@ -104,7 +124,7 @@ INotifyWatchTowerDriver::waitAndProcessEvents(
     fds[1].revents = 0;
 
     list_lock->unlock();
-    int poll_ret = poll( fds, 2, -1 );
+    int poll_ret = poll( fds, 2, timeout_ms ? timeout_ms : -1 );
     list_lock->lock();
 
     if ( poll_ret > 0 )

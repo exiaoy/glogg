@@ -20,8 +20,9 @@ fi
 make -j3
 cp $QTXDIR/$QTVERSION/lib/{QtCore4,QtGui4,QtNetwork4}.dll release/
 cp $QTXDIR/$QTVERSION/lib/{QtCored4,QtGuid4,QtNetworkd4}.dll debug/
+cp /usr/i686-w64-mingw32/lib/libwinpthread-1.dll release/
 if [ -z "$VERSION" ]; then
     VERSION=`git describe`;
 fi
 echo Generating installer for glogg-$VERSION
-wine $QTXDIR/NSIS/makensis -DVERSION=$VERSION glogg.nsi
+wine $QTXDIR/NSIS/makensis -DVERSION=$VERSION -DARCH32 glogg.nsi
